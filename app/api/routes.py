@@ -5,8 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 
+from pydantic import Field
+
 from app.db.database import get_db, init_db, DB_PATH
-from app.db.cards import claim_card as _claim_card, StockLockError
+from app.db.cards import claim_cards as _claim_cards, stock_by_sku, StockLockError, MAX_QUANTITY
 from app.core.security import AdminAuthMiddleware
 from app.services.publisher_service import XianyuPublisherService
 from app.services.XianyuApis import XianyuApis
@@ -52,41 +54,61 @@ def startup_event():
     conn = get_db()
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_order "
-        "ON card_keys(order_id) WHERE order_id IS NOT NULL;"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_card_claim "
-        "ON card_keys(keyword, is_used, id);"
-    )
+    # 索引与 SKU / 一单多件迁移统一在 init_db() 里完成（idx_card_order_seq / idx_card_claim_sku）
     conn.commit()
     conn.close()
 
 
 # ========= 卡密原子出库（防超卖 / 事务独享） =========
-def claim_card(keyword: str, order_id: str):
-    """兼容旧调用：委托给 app.db.cards.claim_card（唯一实现）"""
+def _db_path():
     from app.db import database
-    return _claim_card(database.DB_PATH, keyword, order_id)
+    return database.DB_PATH
+
+
+def claim_cards(keyword: str, order_id: str, quantity: int = 1, sku: str = "", allow_partial: bool = True):
+    """委托 app.db.cards.claim_cards（唯一实现）"""
+    return _claim_cards(_db_path(), keyword, order_id, quantity=quantity, sku=sku, allow_partial=allow_partial)
+
+
+def claim_card(keyword: str, order_id: str, sku: str = ""):
+    """兼容旧调用：一单一卡"""
+    res = claim_cards(keyword, order_id, 1, sku)
+    return res.cards[0] if res.cards else None
 
 
 class ClaimRequest(BaseModel):
     keyword: str
     order_id: str
+    sku: str = ""
+    quantity: int = Field(1, ge=1, le=MAX_QUANTITY)
+    allow_partial: bool = False  # 手动出库默认“凑齐才出”，避免误操作把库存拆散
 
 
 @app.post("/api/cards/claim")
 def claim_card_api(data: ClaimRequest):
     try:
-        card = claim_card(data.keyword, data.order_id)
+        res = claim_cards(data.keyword, data.order_id, data.quantity, data.sku, data.allow_partial)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except StockLockError:
         raise HTTPException(status_code=503, detail="库存繁忙，请稍后重试")
-    if card is None:
+    if not res.cards:
         raise HTTPException(status_code=409, detail="库存不足，卡密已被抢空")
-    return {"success": True, "card_content": card["card_content"]}
+    return {
+        "success": True,
+        "complete": res.complete,
+        "requested": res.requested,
+        "delivered": res.delivered,
+        "shortage": res.shortage,
+        "cards": [{"seq": c["order_seq"], "card_content": c["card_content"]} for c in res.cards],
+        "card_content": res.cards[0]["card_content"],  # 兼容旧前端
+    }
+
+
+@app.get("/api/cards/stock")
+def get_card_stock(keyword: Optional[str] = ""):
+    """库存分布：按 关键词 → 套餐 汇总在库 / 已发"""
+    return {"stock": stock_by_sku(_db_path(), keyword or None)}
 
 
 # ========= 概览指标 =========
@@ -164,11 +186,20 @@ def get_chat_messages(user_id: str, item_id: str):
 
 
 # ========= 发货规则 & 卡密池 Tab =========
+class SkuRule(BaseModel):
+    sku_name: str = Field(..., min_length=1, max_length=40)
+    aliases: str = Field("", max_length=200)          # 逗号分隔的别名，如 “1个月,30天”
+    delivery_content: str = Field("", max_length=4000)  # 该套餐专属说明/网盘，留空则沿用主规则
+    use_card_pool: bool = True
+
+
 class RuleCreate(BaseModel):
     keyword: str
     delivery_content: Optional[str] = ""
     use_card_pool: bool = False
     auto_confirm: bool = True
+    shortage_policy: str = Field("partial", pattern="^(partial|hold)$")
+    skus: Optional[List[SkuRule]] = None  # None=不改动已有套餐；[]=清空套餐细分
 
 
 @app.get("/api/delivery/rules")
@@ -191,6 +222,15 @@ def get_delivery_rules():
         item["card_total"] = stock["total"] or 0
         item["card_stock"] = stock["unused"] or 0
         item["card_used"] = stock["used"] or 0
+        dist = {d["sku"]: d for d in stock_by_sku(_db_path(), item["keyword"])}
+        item["skus"] = []
+        for s in c.execute("SELECT * FROM delivery_rule_skus WHERE rule_id=? ORDER BY id", (item["id"],)):
+            sd = dict(s)
+            d = dist.get(sd["sku_name"], {})
+            sd["card_stock"], sd["card_used"] = d.get("unused", 0), d.get("used", 0)
+            item["skus"].append(sd)
+        g = dist.get("", {})
+        item["generic_stock"], item["generic_used"] = g.get("unused", 0), g.get("used", 0)
         rules.append(item)
     conn.close()
     return {"rules": rules}
@@ -198,25 +238,50 @@ def get_delivery_rules():
 
 @app.post("/api/delivery/rules")
 def create_rule(data: RuleCreate):
+    keyword = data.keyword.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword 不能为空")
+    names = [s.sku_name.strip() for s in (data.skus or [])]
+    if len(set(names)) != len(names) or any(not n for n in names):
+        raise HTTPException(status_code=400, detail="套餐名不能为空或重复")
     conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT OR REPLACE INTO auto_delivery_rules
-            (keyword, delivery_content, use_card_pool, auto_confirm, enabled)
-        VALUES (?, ?, ?, ?, 1)
-        """,
-        (data.keyword.strip(), data.delivery_content.strip(),
-         1 if data.use_card_pool else 0, 1 if data.auto_confirm else 0),
-    )
-    conn.commit()
-    conn.close()
-    return {"success": True}
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # UPSERT 保留规则 id（INSERT OR REPLACE 会换 id，并级联删掉套餐细分）
+        conn.execute(
+            """
+            INSERT INTO auto_delivery_rules
+                (keyword, delivery_content, use_card_pool, auto_confirm, shortage_policy, enabled)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(keyword) DO UPDATE SET
+                delivery_content=excluded.delivery_content, use_card_pool=excluded.use_card_pool,
+                auto_confirm=excluded.auto_confirm, shortage_policy=excluded.shortage_policy, enabled=1
+            """,
+            (keyword, (data.delivery_content or "").strip(), 1 if data.use_card_pool else 0,
+             1 if data.auto_confirm else 0, data.shortage_policy),
+        )
+        rule_id = conn.execute("SELECT id FROM auto_delivery_rules WHERE keyword=?", (keyword,)).fetchone()["id"]
+        if data.skus is not None:
+            conn.execute("DELETE FROM delivery_rule_skus WHERE rule_id=?", (rule_id,))
+            conn.executemany(
+                "INSERT INTO delivery_rule_skus (rule_id, sku_name, aliases, delivery_content, use_card_pool) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(rule_id, s.sku_name.strip(), s.aliases.strip(), s.delivery_content.strip(),
+                  1 if s.use_card_pool else 0) for s in data.skus],
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"success": True, "rule_id": rule_id}
 
 
 @app.delete("/api/delivery/rules/{rule_id}")
 def delete_rule(rule_id: int):
     conn = get_db()
+    conn.execute("DELETE FROM delivery_rule_skus WHERE rule_id=?", (rule_id,))
     conn.execute("DELETE FROM auto_delivery_rules WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
@@ -226,6 +291,7 @@ def delete_rule(rule_id: int):
 class SingleCardCreate(BaseModel):
     keyword: str
     card_content: str
+    sku: str = Field("", max_length=40)  # 套餐/规格，留空=商品通用池
 
 
 @app.post("/api/cards/add")
@@ -234,8 +300,8 @@ def add_single_card(data: SingleCardCreate):
         raise HTTPException(status_code=400, detail="keyword 与 card_content 不能为空")
     conn = get_db()
     conn.execute(
-        "INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-        (data.keyword.strip(), data.card_content.strip()),
+        "INSERT INTO card_keys (keyword, sku, card_content, is_used) VALUES (?, ?, ?, 0)",
+        (data.keyword.strip(), data.sku.strip(), data.card_content.strip()),
     )
     conn.commit()
     conn.close()
@@ -245,6 +311,7 @@ def add_single_card(data: SingleCardCreate):
 class BatchCardImport(BaseModel):
     keyword: str
     raw_keys: str
+    sku: str = Field("", max_length=40)
 
 
 @app.post("/api/cards/import")
@@ -256,21 +323,25 @@ def import_cards(data: BatchCardImport):
     lines = list(dict.fromkeys(ln.strip() for ln in data.raw_keys.splitlines() if ln.strip()))
     conn = get_db()
     c = conn.cursor()
-    c.executemany("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-                  [(keyword, card) for card in lines])
+    sku = data.sku.strip()
+    c.executemany("INSERT INTO card_keys (keyword, sku, card_content, is_used) VALUES (?, ?, ?, 0)",
+                  [(keyword, sku, card) for card in lines])
     conn.commit()
     conn.close()
     return {"success": True, "count": len(lines)}
 
 
 @app.get("/api/cards/list")
-def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
+def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all", sku: Optional[str] = None):
     conn = get_db()
     query = "SELECT * FROM card_keys WHERE 1=1"
     params = []
     if keyword:
         query += " AND keyword=?"
         params.append(keyword)
+    if sku is not None:  # sku= 显式传空串时只看通用池
+        query += " AND sku=?"
+        params.append(sku.strip())
     if status == "unused":
         query += " AND is_used=0"
     elif status == "used":
@@ -284,10 +355,24 @@ def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
 @app.delete("/api/cards/{card_id}")
 def delete_card(card_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM card_keys WHERE id=?", (card_id,))
+    cur = conn.execute("DELETE FROM card_keys WHERE id=? AND is_used=0", (card_id,))
     conn.commit()
     conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=409, detail="卡密不存在或已发出（已发卡密是售后凭证，不可删除）")
     return {"success": True}
+
+
+@app.get("/api/delivery/orders")
+def get_delivery_orders(status: Optional[str] = ""):
+    """订单级发货状态；status=pending 只看缺货待补发 / 转人工"""
+    conn = get_db()
+    q = "SELECT * FROM delivery_orders"
+    if status == "pending":
+        q += " WHERE status IN ('partial','pending_stock','manual')"
+    rows = conn.execute(q + " ORDER BY updated_at DESC LIMIT 100").fetchall()
+    conn.close()
+    return {"orders": [dict(r) for r in rows]}
 
 
 @app.get("/api/delivery/logs")
