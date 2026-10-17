@@ -1,6 +1,8 @@
 import os
 import sys
-from fastapi import FastAPI, Request
+import hmac
+import re
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,13 +15,30 @@ from app.services.XianyuApis import XianyuApis
 
 app = FastAPI(title="Xianyu Copilot API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 默认同源访问；跨域客户端（如独立 App）需显式列在 ALLOWED_ORIGINS
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+def check_token(token: str) -> bool:
+    return bool(ADMIN_TOKEN) and hmac.compare_digest(token or "", ADMIN_TOKEN)
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    """所有 /api/* 需 Bearer 令牌；未配置 ADMIN_TOKEN 时拒绝一切 API，防止裸奔上线"""
+    if request.url.path.startswith("/api/"):
+        auth = request.headers.get("authorization", "")
+        if not check_token(auth.removeprefix("Bearer ").strip()):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
@@ -292,8 +311,13 @@ def get_prompts():
                 prompts[f.replace(".txt", "")] = fp.read()
     return {"prompts": prompts}
 
+PROMPT_NAMES = {"classify_prompt", "price_prompt", "tech_prompt", "default_prompt"}
+
 @app.post("/api/prompts")
 def save_prompts(data: dict):
+    bad = [k for k in data if k not in PROMPT_NAMES or not isinstance(data[k], str)]
+    if bad:  # 白名单，阻断 ../ 路径穿越写文件
+        raise HTTPException(400, f"invalid prompt names: {bad}")
     for name, content in data.items():
         path = os.path.join(PROMPTS_DIR, f"{name}.txt")
         with open(path, "w", encoding="utf-8") as fp:

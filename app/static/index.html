@@ -315,6 +315,24 @@
   </div>
 
   <script>
+    // ===== 安全基建：HTML 转义 + 鉴权 fetch =====
+    const esc = v => String(v ?? '').replace(/[&<>"'`]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[ch]));
+    const _rawFetch = window.fetch.bind(window);
+    window.fetch = (url, opts = {}) => {
+      if (typeof url === 'string' && url.startsWith('/api/')) {
+        const token = localStorage.getItem('xc_token') || '';
+        opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${token}` };
+        return _rawFetch(url, opts).then(r => {
+          if (r.status === 401) {
+            const t = prompt('请输入管理令牌 ADMIN_TOKEN');
+            if (t) { localStorage.setItem('xc_token', t.trim()); location.reload(); }
+          }
+          return r;
+        });
+      }
+      return _rawFetch(url, opts);
+    };
+
     // Tab 切换逻辑
     function switchTab(name) {
       document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
@@ -391,17 +409,17 @@
       let html = '';
       list.forEach(c => {
         html += `
-          <div onclick="openChatModal('${c.user_id}', '${c.item_id}')" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
+          <div data-uid="${esc(c.user_id)}" data-iid="${esc(c.item_id)}" onclick="openChatModal(this.dataset.uid, this.dataset.iid)" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
             <div class="flex items-center space-x-3 min-w-0">
               <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs shrink-0">
-                ${c.user_id.slice(-2)}
+                ${esc(c.user_id.slice(-2))}
               </div>
               <div class="min-w-0">
                 <div class="flex items-center space-x-1.5">
-                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${c.user_id.slice(-6)}</span>
+                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${esc(c.user_id.slice(-6))}</span>
                   ${c.bargain_count > 0 ? `<span class="bg-rose-50 text-rose-600 text-[10px] px-1.5 py-0.5 rounded font-medium">砍价 ${c.bargain_count} 轮</span>` : ''}
                 </div>
-                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${c.last_content}</p>
+                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${esc(c.last_content)}</p>
               </div>
             </div>
             <div class="text-right shrink-0">
@@ -434,14 +452,14 @@
       body.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">加载聊天记录...</div>';
       document.getElementById('chat-modal').classList.remove('hidden');
 
-      const res = await fetch(`/api/chat/messages?user_id=${userId}&item_id=${itemId}`).then(r => r.json());
+      const res = await fetch(`/api/chat/messages?user_id=${encodeURIComponent(userId)}&item_id=${encodeURIComponent(itemId)}`).then(r => r.json());
       let html = '';
       (res.messages || []).forEach(m => {
         const isMe = m.role === 'assistant';
         html += `
           <div class="flex ${isMe ? 'justify-end' : 'justify-start'}">
             <div class="max-w-[75%] px-3 py-2 rounded-2xl text-xs leading-relaxed ${isMe ? 'bg-brand text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none'} shadow-xs">
-              ${m.content}
+              ${esc(m.content)}
             </div>
           </div>
         `;
@@ -469,10 +487,10 @@
         html += `
           <div class="bg-white p-3 rounded-xl border border-slate-200 space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-bold text-slate-800">单号: ${l.order_id || '自动发货'}</span>
-              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold">${l.confirm_status || '已发货'}</span>
+              <span class="font-bold text-slate-800">单号: ${esc(l.order_id || '自动发货')}</span>
+              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold">${esc(l.confirm_status || '已发货')}</span>
             </div>
-            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${l.delivery_content}</p>
+            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${esc(l.delivery_content)}</p>
             <div class="flex items-center justify-between text-[10px] text-slate-400">
               <span>买家: ${l.user_id ? l.user_id.slice(-6) : '-'}</span>
               <span>${l.created_at ? l.created_at.slice(5, 16) : ''}</span>
@@ -563,12 +581,12 @@
           <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between text-xs">
             <div class="min-w-0 pr-2">
               <div class="flex items-center space-x-1.5">
-                <span class="font-bold text-slate-900 truncate">[${c.keyword}]</span>
+                <span class="font-bold text-slate-900 truncate">[${esc(c.keyword)}]</span>
                 <span class="${isUsed ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold">
                   ${isUsed ? '🔴 已发' : '🟢 在库就绪'}
                 </span>
               </div>
-              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${c.card_content}</p>
+              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${esc(c.card_content)}</p>
             </div>
             <div class="shrink-0 text-right">
               <button onclick="delCardItem(${c.id})" class="text-rose-500 text-[10px] hover:underline">删除</button>
@@ -617,14 +635,14 @@
         html += `
           <div class="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
             <div class="flex items-center justify-between font-bold">
-              <span class="text-slate-900">${r.keyword}</span>
+              <span class="text-slate-900">${esc(r.keyword)}</span>
               <button onclick="delRuleItem(${r.id})" class="text-rose-500 text-[11px]">删除</button>
             </div>
             <div class="flex items-center space-x-1.5">
               ${r.use_card_pool ? `<span class="bg-blue-50 text-brand px-1.5 py-0.5 rounded text-[10px] font-semibold">🎫 卡密池 (剩余 ${r.card_stock})</span>` : ''}
               ${r.delivery_content ? `<span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]">🔗 固定说明/网盘</span>` : ''}
             </div>
-            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${r.delivery_content}</p>` : ''}
+            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${esc(r.delivery_content)}</p>` : ''}
           </div>
         `;
       });
@@ -708,10 +726,10 @@
       items.forEach(it => {
         html += `
           <div class="p-2 bg-slate-50 rounded-lg flex items-center justify-between">
-            <span class="font-bold truncate max-w-[200px]">${it.title}</span>
+            <span class="font-bold truncate max-w-[200px]">${esc(it.title)}</span>
             <div class="flex items-center space-x-2">
-              <span class="font-bold text-brand">¥${it.price}</span>
-              ${it.url ? `<a href="${it.url}" target="_blank" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
+              <span class="font-bold text-brand">¥${esc(it.price)}</span>
+              ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
             </div>
           </div>
         `;
