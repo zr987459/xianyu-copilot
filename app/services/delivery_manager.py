@@ -14,7 +14,9 @@ RETRYABLE = ("processing", "partial", "pending_stock", "confirm_failed")
 
 # 订单事件里可能承载规格/数量的字段名（闲鱼不同推送版本命名不一，需用真实 WSS 报文校准）
 SKU_KEYS = ("skuDesc", "sku_desc", "skuInfo", "skuText", "specDesc", "spec_desc", "skuName", "propertiesName")
-QTY_KEYS = ("buyAmount", "buy_amount", "quantity", "itemNum", "item_num", "buyQuantity", "amount", "count")
+# 按优先级排列；刻意不含 amount / count：闲鱼报文里它们常是金额（分）或消息计数，
+# 误读会把 9.9 元的订单当成 9 件、一次掏走 9 张卡
+QTY_KEYS = ("buyAmount", "buy_amount", "buyQuantity", "buy_quantity", "quantity", "itemNum", "item_num")
 
 def _norm(text: str) -> str:
     """规格文本归一：去空白、全角冒号/分号转半角、小写"""
@@ -39,16 +41,15 @@ def parse_order_meta(payload: Any) -> Tuple[str, int]:
     for v in _walk(payload, SKU_KEYS):
         sku_desc = v if isinstance(v, str) else str(v)
         break
-    qty = 1
-    for v in _walk(payload, QTY_KEYS):
-        try:
-            n = int(str(v).strip())
-        except ValueError:
-            continue
-        if n >= 1:
-            qty = n
-            break
-    return sku_desc.strip(), qty
+    for key in QTY_KEYS:  # 按字段优先级取，而不是按报文里出现的先后
+        for v in _walk(payload, (key,)):
+            try:
+                n = int(str(v).strip())
+            except ValueError:
+                continue
+            if n >= 1:
+                return sku_desc.strip(), n
+    return sku_desc.strip(), 1
 
 
 class AutoDeliveryManager:
