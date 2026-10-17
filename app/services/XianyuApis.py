@@ -5,7 +5,7 @@ import sys
 
 import requests
 from loguru import logger
-from utils.xianyu_utils import generate_sign
+from app.utils.xianyu_utils import generate_sign
 
 
 class XianyuApis:

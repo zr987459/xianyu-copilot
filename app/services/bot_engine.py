@@ -2,7 +2,7 @@ import re
 from typing import List, Dict
 import os
 from loguru import logger
-from llm_client import UnifiedLLMClient
+from app.core.llm_client import UnifiedLLMClient
 
 
 class XianyuReplyBot:
