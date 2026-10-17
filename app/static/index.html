@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>闲鱼管家 Pro - Xianyu Copilot</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: '#2563EB', // Blue-600 经典专业蓝
+            'brand-light': '#EFF6FF',
+            'brand-dark': '#1D4ED8',
+            surface: '#F8FAFC',
+            card: '#FFFFFF',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #F1F5F9;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    /* 隐藏滚动条 */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    /* iOS 底部安全区域支持 */
+    .safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  </style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden text-slate-800">
+
+  <!-- 顶部状态导航栏 (App Header) -->
+  <header class="bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between z-20 shrink-0">
+    <div class="flex items-center space-x-2">
+      <div class="w-8 h-8 rounded-full bg-brand flex items-center justify-center text-white shadow-sm">
+        <i data-lucide="bot" class="w-5 h-5"></i>
+      </div>
+      <div>
+        <h1 class="font-bold text-sm text-slate-900 leading-tight">Xianyu Copilot</h1>
+        <div class="flex items-center space-x-1.5 text-[11px] text-emerald-600 font-medium">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span id="conn-status">AI 7x24h 协同值守中</span>
+        </div>
+      </div>
+    </div>
+    <div class="flex items-center space-x-2">
+      <button onclick="refreshCurrentTab()" class="p-1.5 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition active:scale-95">
+        <i data-lucide="rotate-cw" class="w-4 h-4"></i>
+      </button>
+      <button onclick="switchTab('settings')" class="p-1.5 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition active:scale-95">
+        <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- 主体可滚动内容区 -->
+  <main class="flex-1 overflow-y-auto no-scrollbar relative bg-slate-50" id="main-scroll">
+    
+    <!-- ==================== TAB 1: 消息 (Messages) ==================== -->
+    <div id="tab-messages" class="tab-pane block p-4 space-y-3 pb-24">
+      <!-- 搜索栏 -->
+      <div class="relative">
+        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-3 text-slate-400"></i>
+        <input type="text" id="chat-search" oninput="filterChats()" placeholder="搜索买家昵称、消息或商品ID..." 
+          class="w-full pl-9 pr-4 py-2 bg-white rounded-xl text-xs border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand">
+      </div>
+
+      <!-- 会话卡片列表 -->
+      <div id="chat-list-container" class="space-y-2">
+        <div class="text-center py-12 text-slate-400 text-xs flex flex-col items-center">
+          <i data-lucide="message-square" class="w-8 h-8 mb-2 opacity-50"></i>
+          正在同步买家会话流...
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== TAB 2: 订单 (Orders) ==================== -->
+    <div id="tab-orders" class="tab-pane hidden p-4 space-y-3 pb-24">
+      <!-- 订单状态过滤器 -->
+      <div class="flex bg-slate-200/80 p-1 rounded-xl text-xs font-medium text-slate-600">
+        <button onclick="filterOrderTab('all')" id="btn-ord-all" class="flex-1 py-1.5 rounded-lg bg-white text-slate-900 shadow-sm transition">全部</button>
+        <button onclick="filterOrderTab('wait_pay')" id="btn-ord-wait_pay" class="flex-1 py-1.5 rounded-lg transition">待付款</button>
+        <button onclick="filterOrderTab('wait_send')" id="btn-ord-wait_send" class="flex-1 py-1.5 rounded-lg transition">待发货</button>
+        <button onclick="filterOrderTab('delivered')" id="btn-ord-delivered" class="flex-1 py-1.5 rounded-lg transition">已发货</button>
+      </div>
+
+      <!-- 订单卡片列表 -->
+      <div id="orders-list-container" class="space-y-2.5">
+        <div class="text-center py-12 text-slate-400 text-xs flex flex-col items-center">
+          <i data-lucide="package" class="w-8 h-8 mb-2 opacity-50"></i>
+          暂无订单流水
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== TAB 3: 商品与发货 (Products & Delivery) ==================== -->
+    <div id="tab-products" class="tab-pane hidden p-4 space-y-3 pb-24">
+      <!-- 三段式顶部切换 -->
+      <div class="flex border-b border-slate-200 bg-white -mx-4 -mt-4 px-4 pt-2">
+        <button onclick="switchSubTab('cards')" id="subtab-cards" class="flex-1 py-2.5 text-xs font-semibold text-brand border-b-2 border-brand transition">🎫 卡密资产池</button>
+        <button onclick="switchSubTab('delivery_rules')" id="subtab-delivery_rules" class="flex-1 py-2.5 text-xs font-semibold text-slate-500 border-b-2 border-transparent transition">⚡ 复合发货规则</button>
+        <button onclick="switchSubTab('publish_items')" id="subtab-publish_items" class="flex-1 py-2.5 text-xs font-semibold text-slate-500 border-b-2 border-transparent transition">🚀 一键上架发布</button>
+      </div>
+
+      <!-- 子分栏 1: 卡密资产池 -->
+      <div id="subpane-cards" class="space-y-3">
+        <!-- 统计指标小卡片 -->
+        <div class="grid grid-cols-2 gap-2">
+          <div class="bg-white p-3 rounded-xl border border-slate-200">
+            <span class="text-[11px] text-slate-400 block">在库可用卡密</span>
+            <span class="text-lg font-bold text-emerald-600" id="card-stock-val">0</span>
+          </div>
+          <div class="bg-white p-3 rounded-xl border border-slate-200">
+            <span class="text-[11px] text-slate-400 block">累计已核销发货</span>
+            <span class="text-lg font-bold text-slate-600" id="card-used-val">0</span>
+          </div>
+        </div>
+
+        <!-- 录入卡片 -->
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-slate-900">录入新卡密</span>
+            <div class="flex text-[11px] bg-slate-100 p-0.5 rounded-lg">
+              <button onclick="setCardEntryMode('single')" id="btn-card-mode-single" class="px-2 py-0.5 rounded bg-white font-medium text-slate-800 shadow-xs">单码录入</button>
+              <button onclick="setCardEntryMode('batch')" id="btn-card-mode-batch" class="px-2 py-0.5 rounded text-slate-500 font-medium">批量导入</button>
+            </div>
+          </div>
+          <input type="text" id="card-input-keyword" placeholder="所属商品关键词 (如: 激活码 / 月卡 / 百度网盘)" 
+            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+          
+          <div id="card-mode-single-box">
+            <input type="text" id="card-input-single" placeholder="输入单条卡密 (如: ABCD-1234-EFGH-5678)" 
+              class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+            <button onclick="submitSingleCard()" class="w-full mt-2 py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition">➕ 保存单个卡密</button>
+          </div>
+
+          <div id="card-mode-batch-box" class="hidden">
+            <textarea id="card-input-batch" placeholder="一行一个卡密：&#10;AAAA-1111-2222&#10;BBBB-3333-4444" 
+              class="w-full h-20 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand"></textarea>
+            <button onclick="submitBatchCards()" class="w-full mt-2 py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition">📥 批量导入库存</button>
+          </div>
+        </div>
+
+        <!-- 卡密列表与过滤 -->
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-slate-900">卡密库存明细</span>
+            <div class="flex space-x-1 text-[11px]">
+              <button onclick="filterCardTable('all')" id="ftab-all" class="px-2 py-0.5 rounded-md bg-slate-200 text-slate-800 font-medium">全部</button>
+              <button onclick="filterCardTable('unused')" id="ftab-unused" class="px-2 py-0.5 rounded-md text-slate-500 font-medium">在库</button>
+              <button onclick="filterCardTable('used')" id="ftab-used" class="px-2 py-0.5 rounded-md text-slate-500 font-medium">已发</button>
+            </div>
+          </div>
+          <div id="card-table-list" class="space-y-1.5 max-h-72 overflow-y-auto no-scrollbar"></div>
+        </div>
+      </div>
+
+      <!-- 子分栏 2: 复合发货规则 -->
+      <div id="subpane-delivery_rules" class="hidden space-y-3">
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-slate-900">添加自动发货规则</span>
+            <span class="text-[11px] text-slate-400">支持网盘+卡密同时发</span>
+          </div>
+          <input type="text" id="rule-kw" placeholder="匹配标题关键词 (* 为通用全部)" 
+            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+          
+          <div class="flex items-center space-x-2 p-2 bg-slate-50 rounded-lg border border-slate-100">
+            <input type="checkbox" id="rule-use-pool" class="w-4 h-4 text-brand rounded border-slate-300 focus:ring-brand" checked>
+            <label for="rule-use-pool" class="text-xs text-slate-700 font-medium cursor-pointer">🎫 关联卡密池（每单独享抽取 1 张未发卡密）</label>
+          </div>
+
+          <textarea id="rule-fixed-text" placeholder="固定下发内容 (可选，如网盘下载链接/教程)：&#10;网盘地址: https://pan.baidu.com/... 提取码: 1234" 
+            class="w-full h-16 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand"></textarea>
+          
+          <button onclick="submitDeliveryRule()" class="w-full py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition">➕ 保存复合发货规则</button>
+        </div>
+
+        <div id="rules-card-list" class="space-y-2"></div>
+      </div>
+
+      <!-- 子分栏 3: 一键上架发布 -->
+      <div id="subpane-publish_items" class="hidden space-y-3">
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+          <span class="text-xs font-bold text-slate-900 block">发布新商品到闲鱼</span>
+          <input type="text" id="pub-item-title" placeholder="商品标题 *" 
+            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+          <div class="flex space-x-2">
+            <input type="number" id="pub-item-price" placeholder="售价 (元) *" step="0.1" 
+              class="w-1/2 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+            <input type="number" id="pub-item-orig" placeholder="划线原价 (元)" step="0.1" 
+              class="w-1/2 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+          </div>
+          <textarea id="pub-item-desc" placeholder="宝贝详细描述..." 
+            class="w-full h-16 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand"></textarea>
+          <input type="file" id="pub-item-img" accept="image/*" class="text-xs text-slate-500">
+          <button onclick="submitPublishItem()" id="btn-publish-submit" class="w-full py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition">🚀 立即调用官方接口发布</button>
+        </div>
+
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2">
+          <span class="text-xs font-bold text-slate-900 block">已发布宝贝列表</span>
+          <div id="published-items-list" class="space-y-2 max-h-60 overflow-y-auto no-scrollbar text-xs"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== TAB 4: 我的与设置 (Mine & Settings) ==================== -->
+    <div id="tab-settings" class="tab-pane hidden p-4 space-y-3 pb-24">
+      <!-- 账号信息卡片 (借鉴 xianyu-mobile 用户卡片) -->
+      <div class="bg-gradient-to-r from-brand to-brand-dark p-4 rounded-2xl text-white shadow-md relative overflow-hidden">
+        <div class="relative z-10 flex items-center space-x-3">
+          <div class="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center font-bold text-lg">
+            🐟
+          </div>
+          <div>
+            <h2 class="font-bold text-base" id="acc-name">闲鱼店主</h2>
+            <p class="text-xs text-blue-100" id="acc-id">Cookie 保鲜中 • 智能值守已就绪</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4 大核心指标卡片 -->
+      <div class="grid grid-cols-4 gap-2">
+        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center">
+          <span class="text-[10px] text-slate-400 block">总咨询</span>
+          <span class="text-sm font-bold text-slate-900" id="stat-chats">0</span>
+        </div>
+        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center">
+          <span class="text-[10px] text-slate-400 block">在售宝贝</span>
+          <span class="text-sm font-bold text-slate-900" id="stat-items-count">0</span>
+        </div>
+        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center">
+          <span class="text-[10px] text-slate-400 block">在库卡密</span>
+          <span class="text-sm font-bold text-emerald-600" id="stat-cards-count">0</span>
+        </div>
+        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center">
+          <span class="text-[10px] text-slate-400 block">自动发货</span>
+          <span class="text-sm font-bold text-blue-600" id="stat-delivery-count">0</span>
+        </div>
+      </div>
+
+      <!-- AI 专家 Prompt 在线配置 -->
+      <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2">
+        <span class="text-xs font-bold text-slate-900 flex items-center justify-between">
+          <span>AI 阶梯砍价专家 Prompt</span>
+          <span class="text-[11px] text-brand cursor-pointer" onclick="saveSettingsPrompts()">💾 保存</span>
+        </span>
+        <textarea id="setting-prompt-price" class="w-full h-20 p-2 text-xs bg-slate-50 rounded-lg border border-slate-200"></textarea>
+      </div>
+
+      <div class="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2">
+        <span class="text-xs font-bold text-slate-900 flex items-center justify-between">
+          <span>日常客服与答疑 Prompt</span>
+          <span class="text-[11px] text-brand cursor-pointer" onclick="saveSettingsPrompts()">💾 保存</span>
+        </span>
+        <textarea id="setting-prompt-default" class="w-full h-20 p-2 text-xs bg-slate-50 rounded-lg border border-slate-200"></textarea>
+      </div>
+
+      <!-- 系统环境 -->
+      <div class="bg-white p-3.5 rounded-xl border border-slate-200">
+        <span class="text-xs font-bold text-slate-900 mb-2 block">底层网关配置</span>
+        <pre id="sys-env-pre" class="text-[10px] bg-slate-900 text-emerald-400 p-2.5 rounded-lg overflow-x-auto"></pre>
+      </div>
+    </div>
+  </main>
+
+  <!-- 底部固定 4 大导航 Tab (对齐 xianyu-mobile 4 大 Tab) -->
+  <nav class="bg-white border-t border-slate-200 fixed bottom-0 left-0 right-0 z-30 safe-bottom">
+    <div class="flex justify-around items-center h-14">
+      <button onclick="switchTab('messages')" id="nav-messages" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-brand transition active:scale-90">
+        <i data-lucide="message-circle" class="w-5 h-5 mb-0.5"></i>
+        <span class="text-[10px] font-semibold">消息</span>
+      </button>
+      <button onclick="switchTab('orders')" id="nav-orders" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
+        <i data-lucide="clipboard-list" class="w-5 h-5 mb-0.5"></i>
+        <span class="text-[10px] font-medium">订单</span>
+      </button>
+      <button onclick="switchTab('products')" id="nav-products" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
+        <i data-lucide="tag" class="w-5 h-5 mb-0.5"></i>
+        <span class="text-[10px] font-medium">商品发货</span>
+      </button>
+      <button onclick="switchTab('settings')" id="nav-settings" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
+        <i data-lucide="user" class="w-5 h-5 mb-0.5"></i>
+        <span class="text-[10px] font-medium">我的设置</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- 聊天详情滑动弹窗 Modal -->
+  <div id="chat-modal" class="fixed inset-0 bg-black/40 z-50 hidden flex flex-col justify-end">
+    <div class="bg-white rounded-t-2xl max-h-[85vh] h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+      <div class="p-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+        <div class="flex items-center space-x-2">
+          <div class="w-7 h-7 rounded-full bg-brand text-white flex items-center justify-center text-xs font-bold">👤</div>
+          <div>
+            <span class="text-xs font-bold text-slate-900 block" id="modal-buyer-title">买家对话</span>
+            <span class="text-[10px] text-slate-400" id="modal-buyer-sub">商品ID: -</span>
+          </div>
+        </div>
+        <button onclick="closeChatModal()" class="p-1 text-slate-400 hover:text-slate-700">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-3 space-y-2.5 bg-slate-100/60 no-scrollbar" id="modal-chat-body"></div>
+    </div>
+  </div>
+
+  <script>
+    // Tab 切换逻辑
+    function switchTab(name) {
+      document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
+      document.getElementById('tab-' + name).classList.remove('hidden');
+
+      document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.classList.remove('text-brand', 'font-semibold');
+        btn.classList.add('text-slate-400', 'font-medium');
+      });
+      const activeBtn = document.getElementById('nav-' + name);
+      activeBtn.classList.remove('text-slate-400', 'font-medium');
+      activeBtn.classList.add('text-brand', 'font-semibold');
+
+      if (name === 'messages') loadChats();
+      if (name === 'orders') loadOrders();
+      if (name === 'products') loadProductData();
+      if (name === 'settings') loadSettings();
+      lucide.createIcons();
+    }
+
+    function switchSubTab(sub) {
+      ['cards', 'delivery_rules', 'publish_items'].forEach(s => {
+        document.getElementById('subpane-' + s).classList.toggle('hidden', s !== sub);
+        const tabBtn = document.getElementById('subtab-' + s);
+        tabBtn.classList.toggle('text-brand', s === sub);
+        tabBtn.classList.toggle('border-brand', s === sub);
+        tabBtn.classList.toggle('text-slate-500', s !== sub);
+        tabBtn.classList.toggle('border-transparent', s !== sub);
+      });
+      if (sub === 'cards') loadCardsStock();
+      if (sub === 'delivery_rules') loadDeliveryRules();
+      if (sub === 'publish_items') loadPublishedItems();
+      lucide.createIcons();
+    }
+
+    function refreshCurrentTab() {
+      loadStats();
+      const activeTab = document.querySelector('.tab-pane:not(.hidden)').id.replace('tab-', '');
+      switchTab(activeTab);
+    }
+
+    // 统计数据
+    async function loadStats() {
+      try {
+        const res = await fetch('/api/stats').then(r => r.json());
+        document.getElementById('stat-chats').innerText = res.total_msgs || 0;
+        document.getElementById('stat-items-count').innerText = res.total_items || 0;
+        document.getElementById('stat-cards-count').innerText = res.available_cards || 0;
+        document.getElementById('stat-delivery-count').innerText = res.total_delivered || 0;
+        document.getElementById('card-stock-val').innerText = res.available_cards || 0;
+        document.getElementById('card-used-val').innerText = res.used_cards || 0;
+      } catch (e) {}
+    }
+
+    // 会话列表
+    let allChats = [];
+    async function loadChats() {
+      const box = document.getElementById('chat-list-container');
+      try {
+        const res = await fetch('/api/chats').then(r => r.json());
+        allChats = res.chats || [];
+        renderChatList(allChats);
+      } catch (e) {
+        box.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">拉取会话失败</div>';
+      }
+    }
+
+    function renderChatList(list) {
+      const box = document.getElementById('chat-list-container');
+      if (!list || list.length === 0) {
+        box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无买家咨询，AI 正在监听中...</div>';
+        return;
+      }
+      let html = '';
+      list.forEach(c => {
+        html += `
+          <div onclick="openChatModal('${c.user_id}', '${c.item_id}')" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
+            <div class="flex items-center space-x-3 min-w-0">
+              <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs shrink-0">
+                ${c.user_id.slice(-2)}
+              </div>
+              <div class="min-w-0">
+                <div class="flex items-center space-x-1.5">
+                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${c.user_id.slice(-6)}</span>
+                  ${c.bargain_count > 0 ? `<span class="bg-rose-50 text-rose-600 text-[10px] px-1.5 py-0.5 rounded font-medium">砍价 ${c.bargain_count} 轮</span>` : ''}
+                </div>
+                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${c.last_content}</p>
+              </div>
+            </div>
+            <div class="text-right shrink-0">
+              <span class="text-[10px] text-slate-400">${c.last_time ? c.last_time.slice(11, 16) : ''}</span>
+              <span class="block bg-slate-100 text-slate-600 text-[10px] px-1.5 rounded-full mt-1 font-semibold">${c.msg_count}</span>
+            </div>
+          </div>
+        `;
+      });
+      box.innerHTML = html;
+      lucide.createIcons();
+    }
+
+    function filterChats() {
+      const q = document.getElementById('chat-search').value.toLowerCase().trim();
+      if (!q) { renderChatList(allChats); return; }
+      const filtered = allChats.filter(c => 
+        c.user_id.toLowerCase().includes(q) || 
+        c.last_content.toLowerCase().includes(q) || 
+        (c.item_id && c.item_id.toLowerCase().includes(q))
+      );
+      renderChatList(filtered);
+    }
+
+    // 聊天详情 Modal
+    async function openChatModal(userId, itemId) {
+      document.getElementById('modal-buyer-title').innerText = '买家 ' + userId.slice(-6);
+      document.getElementById('modal-buyer-sub').innerText = '商品: ' + itemId;
+      const body = document.getElementById('modal-chat-body');
+      body.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">加载聊天记录...</div>';
+      document.getElementById('chat-modal').classList.remove('hidden');
+
+      const res = await fetch(`/api/chat/messages?user_id=${userId}&item_id=${itemId}`).then(r => r.json());
+      let html = '';
+      (res.messages || []).forEach(m => {
+        const isMe = m.role === 'assistant';
+        html += `
+          <div class="flex ${isMe ? 'justify-end' : 'justify-start'}">
+            <div class="max-w-[75%] px-3 py-2 rounded-2xl text-xs leading-relaxed ${isMe ? 'bg-brand text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none'} shadow-xs">
+              ${m.content}
+            </div>
+          </div>
+        `;
+      });
+      body.innerHTML = html;
+      body.scrollTop = body.scrollHeight;
+      lucide.createIcons();
+    }
+
+    function closeChatModal() {
+      document.getElementById('chat-modal').classList.add('hidden');
+    }
+
+    // 订单
+    async function loadOrders() {
+      const box = document.getElementById('orders-list-container');
+      const res = await fetch('/api/delivery/logs').then(r => r.json());
+      const logs = res.logs || [];
+      if (logs.length === 0) {
+        box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无发货订单记录</div>';
+        return;
+      }
+      let html = '';
+      logs.forEach(l => {
+        html += `
+          <div class="bg-white p-3 rounded-xl border border-slate-200 space-y-1.5">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-bold text-slate-800">单号: ${l.order_id || '自动发货'}</span>
+              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold">${l.confirm_status || '已发货'}</span>
+            </div>
+            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${l.delivery_content}</p>
+            <div class="flex items-center justify-between text-[10px] text-slate-400">
+              <span>买家: ${l.user_id ? l.user_id.slice(-6) : '-'}</span>
+              <span>${l.created_at ? l.created_at.slice(5, 16) : ''}</span>
+            </div>
+          </div>
+        `;
+      });
+      box.innerHTML = html;
+    }
+
+    function filterOrderTab(status) {
+      ['all', 'wait_pay', 'wait_send', 'delivered'].forEach(s => {
+        const btn = document.getElementById('btn-ord-' + s);
+        btn.classList.toggle('bg-white', s === status);
+        btn.classList.toggle('text-slate-900', s === status);
+        btn.classList.toggle('shadow-sm', s === status);
+      });
+    }
+
+    // 卡密管理
+    function setCardEntryMode(mode) {
+      document.getElementById('card-mode-single-box').classList.toggle('hidden', mode !== 'single');
+      document.getElementById('card-mode-batch-box').classList.toggle('hidden', mode !== 'batch');
+      document.getElementById('btn-card-mode-single').classList.toggle('bg-white', mode === 'single');
+      document.getElementById('btn-card-mode-single').classList.toggle('shadow-xs', mode === 'single');
+      document.getElementById('btn-card-mode-batch').classList.toggle('bg-white', mode === 'batch');
+      document.getElementById('btn-card-mode-batch').classList.toggle('shadow-xs', mode === 'batch');
+    }
+
+    async function submitSingleCard() {
+      const kw = document.getElementById('card-input-keyword').value.trim();
+      const content = document.getElementById('card-input-single').value.trim();
+      if (!kw || !content) { alert('请填写商品关键词和卡密！'); return; }
+      const res = await fetch('/api/cards/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ keyword: kw, card_content: content })
+      }).then(r => r.json());
+      if (res.success) {
+        document.getElementById('card-input-single').value = '';
+        loadCardsStock();
+        loadStats();
+        alert('🎉 单个卡密已成功录入！');
+      }
+    }
+
+    async function submitBatchCards() {
+      const kw = document.getElementById('card-input-keyword').value.trim();
+      const raw = document.getElementById('card-input-batch').value.trim();
+      if (!kw || !raw) { alert('请填写商品关键词和多行卡密！'); return; }
+      const res = await fetch('/api/cards/import', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ keyword: kw, raw_keys: raw })
+      }).then(r => r.json());
+      if (res.success) {
+        document.getElementById('card-input-batch').value = '';
+        loadCardsStock();
+        loadStats();
+        alert(`🎉 成功导入 ${res.count} 条卡密入库！`);
+      }
+    }
+
+    let cardTableFilter = 'all';
+    function filterCardTable(status) {
+      cardTableFilter = status;
+      ['all', 'unused', 'used'].forEach(s => {
+        const btn = document.getElementById('ftab-' + s);
+        btn.classList.toggle('bg-slate-200', s === status);
+        btn.classList.toggle('text-slate-800', s === status);
+        btn.classList.toggle('text-slate-500', s !== status);
+      });
+      loadCardsStock();
+    }
+
+    async function loadCardsStock() {
+      const box = document.getElementById('card-table-list');
+      const res = await fetch(`/api/cards/list?status=${cardTableFilter}`).then(r => r.json());
+      const cards = res.cards || [];
+      if (cards.length === 0) {
+        box.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">暂无对应状态的卡密记录</div>';
+        return;
+      }
+      let html = '';
+      cards.forEach(c => {
+        const isUsed = c.is_used === 1;
+        html += `
+          <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between text-xs">
+            <div class="min-w-0 pr-2">
+              <div class="flex items-center space-x-1.5">
+                <span class="font-bold text-slate-900 truncate">[${c.keyword}]</span>
+                <span class="${isUsed ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold">
+                  ${isUsed ? '🔴 已发' : '🟢 在库就绪'}
+                </span>
+              </div>
+              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${c.card_content}</p>
+            </div>
+            <div class="shrink-0 text-right">
+              <button onclick="delCardItem(${c.id})" class="text-rose-500 text-[10px] hover:underline">删除</button>
+            </div>
+          </div>
+        `;
+      });
+      box.innerHTML = html;
+    }
+
+    async function delCardItem(id) {
+      if (!confirm('确认删除此卡密？')) return;
+      await fetch(`/api/cards/${id}`, { method: 'DELETE' });
+      loadCardsStock();
+      loadStats();
+    }
+
+    // 复合发货规则
+    async function submitDeliveryRule() {
+      const kw = document.getElementById('rule-kw').value.trim();
+      const usePool = document.getElementById('rule-use-pool').checked;
+      const fixed = document.getElementById('rule-fixed-text').value.trim();
+      if (!kw) { alert('请输入关键词！'); return; }
+      if (!usePool && !fixed) { alert('必须至少选择一种发货方式！'); return; }
+      await fetch('/api/delivery/rules', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ keyword: kw, use_card_pool: usePool, delivery_content: fixed })
+      });
+      document.getElementById('rule-kw').value = '';
+      document.getElementById('rule-fixed-text').value = '';
+      loadDeliveryRules();
+      alert('✅ 自动发货规则已生效！');
+    }
+
+    async function loadDeliveryRules() {
+      const box = document.getElementById('rules-card-list');
+      const res = await fetch('/api/delivery/rules').then(r => r.json());
+      const rules = res.rules || [];
+      if (rules.length === 0) {
+        box.innerHTML = '<div class="text-center py-6 text-xs text-slate-400">暂无发货规则，请在上方添加</div>';
+        return;
+      }
+      let html = '';
+      rules.forEach(r => {
+        html += `
+          <div class="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
+            <div class="flex items-center justify-between font-bold">
+              <span class="text-slate-900">${r.keyword}</span>
+              <button onclick="delRuleItem(${r.id})" class="text-rose-500 text-[11px]">删除</button>
+            </div>
+            <div class="flex items-center space-x-1.5">
+              ${r.use_card_pool ? `<span class="bg-blue-50 text-brand px-1.5 py-0.5 rounded text-[10px] font-semibold">🎫 卡密池 (剩余 ${r.card_stock})</span>` : ''}
+              ${r.delivery_content ? `<span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]">🔗 固定说明/网盘</span>` : ''}
+            </div>
+            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${r.delivery_content}</p>` : ''}
+          </div>
+        `;
+      });
+      box.innerHTML = html;
+    }
+
+    async function delRuleItem(id) {
+      if (!confirm('确认删除该发货规则？')) return;
+      await fetch(`/api/delivery/rules/${id}`, { method: 'DELETE' });
+      loadDeliveryRules();
+    }
+
+    // 商品发布
+    async function submitPublishItem() {
+      const title = document.getElementById('pub-item-title').value.trim();
+      const price = parseFloat(document.getElementById('pub-item-price').value);
+      const orig = parseFloat(document.getElementById('pub-item-orig').value) || price;
+      const desc = document.getElementById('pub-item-desc').value.trim();
+      const imgInput = document.getElementById('pub-item-img');
+
+      if (!title || !desc || isNaN(price) || price <= 0) {
+        alert('请完整填写标题、描述与售价！');
+        return;
+      }
+
+      const btn = document.getElementById('btn-publish-submit');
+      btn.disabled = true;
+      btn.innerText = '⏳ 正在调用闲鱼官方接口上传发布...';
+
+      let imgBase64 = '';
+      if (imgInput.files.length > 0) {
+        imgBase64 = await new Promise(res => {
+          const reader = new FileReader();
+          reader.onload = e => res(e.target.result);
+          reader.readAsDataURL(imgInput.files[0]);
+        });
+      }
+
+      try {
+        const res = await fetch('/api/publish/item', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            title: title,
+            price: price,
+            original_price: orig,
+            description: desc,
+            image_base64: imgBase64
+          })
+        }).then(r => r.json());
+
+        if (res.success) {
+          alert('🎉 宝贝已发布成功！');
+          document.getElementById('pub-item-title').value = '';
+          document.getElementById('pub-item-price').value = '';
+          document.getElementById('pub-item-orig').value = '';
+          document.getElementById('pub-item-desc').value = '';
+          imgInput.value = '';
+          loadPublishedItems();
+          loadStats();
+        } else {
+          alert('发布失败: ' + (res.data ? res.data.message : res.message));
+        }
+      } catch (e) {
+        alert('请求异常: ' + e);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '🚀 立即调用官方接口发布';
+      }
+    }
+
+    async function loadPublishedItems() {
+      const box = document.getElementById('published-items-list');
+      const res = await fetch('/api/publish/list').then(r => r.json());
+      const items = res.items || [];
+      if (items.length === 0) {
+        box.innerHTML = '<div class="text-center py-4 text-slate-400">暂无已上架商品记录</div>';
+        return;
+      }
+      let html = '';
+      items.forEach(it => {
+        html += `
+          <div class="p-2 bg-slate-50 rounded-lg flex items-center justify-between">
+            <span class="font-bold truncate max-w-[200px]">${it.title}</span>
+            <div class="flex items-center space-x-2">
+              <span class="font-bold text-brand">¥${it.price}</span>
+              ${it.url ? `<a href="${it.url}" target="_blank" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
+            </div>
+          </div>
+        `;
+      });
+      box.innerHTML = html;
+    }
+
+    function loadProductData() {
+      loadCardsStock();
+      loadDeliveryRules();
+      loadPublishedItems();
+    }
+
+    // 设置与 Prompt
+    async function loadSettings() {
+      const pRes = await fetch('/api/prompts').then(r => r.json());
+      if (pRes.prompts) {
+        document.getElementById('setting-prompt-price').value = pRes.prompts.price_prompt || '';
+        document.getElementById('setting-prompt-default').value = pRes.prompts.default_prompt || '';
+      }
+      const cRes = await fetch('/api/config').then(r => r.json());
+      document.getElementById('sys-env-pre').innerText = JSON.stringify(cRes.config || {}, null, 2);
+    }
+
+    async function saveSettingsPrompts() {
+      const payload = {
+        price_prompt: document.getElementById('setting-prompt-price').value,
+        default_prompt: document.getElementById('setting-prompt-default').value
+      };
+      await fetch('/api/prompts', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      alert('✅ 提示词已保存生效！');
+    }
+
+    // 页面初始化
+    loadStats();
+    loadChats();
+    lucide.createIcons();
+    setInterval(loadStats, 10000);
+  </script>
+</body>
+</html>
