@@ -7,7 +7,7 @@
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lucide@0.453.0/dist/umd/lucide.min.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -330,6 +330,27 @@
   </div>
 
   <script>
+    // 管理令牌：给同源 /api 请求自动带上 X-Admin-Token；遇到 401 提示输入一次并保存在本机
+    (function () {
+      const KEY = 'xc_admin_token';
+      const rawFetch = window.fetch.bind(window);
+      window.fetch = async function (input, init) {
+        const url = typeof input === 'string' ? input : input.url;
+        if (!url.startsWith('/api/')) return rawFetch(input, init);
+        init = Object.assign({}, init || {});
+        const headers = new Headers(init.headers || {});
+        const tok = localStorage.getItem(KEY);
+        if (tok) headers.set('X-Admin-Token', tok);
+        init.headers = headers;
+        const res = await rawFetch(input, init);
+        if (res.status === 401) {
+          const t = prompt('请输入管理令牌（与服务端 ADMIN_TOKEN 一致）');
+          if (t) { localStorage.setItem(KEY, t.trim()); headers.set('X-Admin-Token', t.trim()); return rawFetch(input, init); }
+        }
+        return res;
+      };
+    })();
+
     // Tab 切换逻辑
     function switchTab(name) {
       document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
@@ -837,10 +858,11 @@
         pSpan.className = "font-bold text-brand";
         pSpan.textContent = `¥${it.price}`;
         right.appendChild(pSpan);
-        if (it.url) {
+        if (it.url && /^https?:\/\//i.test(String(it.url))) {
           const a = document.createElement('a');
           a.href = it.url;
           a.target = "_blank";
+          a.rel = "noopener noreferrer";
           a.className = "text-blue-500 underline text-[11px]";
           a.textContent = '查看';
           right.appendChild(a);

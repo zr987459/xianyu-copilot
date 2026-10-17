@@ -2,7 +2,7 @@ import re
 from typing import List, Dict
 import os
 from loguru import logger
-from llm_client import UnifiedLLMClient
+from app.core.llm_client import UnifiedLLMClient
 
 
 class XianyuReplyBot:
@@ -26,7 +26,7 @@ class XianyuReplyBot:
 
     def _init_system_prompts(self):
         """初始化各Agent专用提示词，优先加载用户自定义文件，否则使用Example默认文件"""
-        prompt_dir = "prompts"
+        prompt_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "prompts")
         
         def load_prompt_content(name: str) -> str:
             """尝试加载提示词文件"""

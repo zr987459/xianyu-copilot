@@ -19,6 +19,8 @@ class AutoDeliveryManager:
         c = conn.cursor()
         rules = c.execute("SELECT * FROM auto_delivery_rules WHERE enabled=1").fetchall()
         conn.close()
+        # 最长关键词优先，避免「月卡」抢先匹配「年月卡」之类的歧义
+        rules = sorted(rules, key=lambda r: len((r['keyword'] or '').strip()), reverse=True)
 
         for r in rules:
             kw = r['keyword'].strip()
@@ -64,7 +66,16 @@ class AutoDeliveryManager:
         except Exception as e:
             conn.rollback()
             logger.error(f"提取卡密异常: {e}")
-            return None
+            raise  # 数据库异常不能当成「库存不足」处理
+        finally:
+            conn.close()
+
+    def already_delivered(self, order_id):
+        if not order_id:
+            return False
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute("SELECT 1 FROM delivery_logs WHERE order_id=? LIMIT 1", (order_id,)).fetchone() is not None
         finally:
             conn.close()
 
@@ -81,6 +92,11 @@ class AutoDeliveryManager:
     async def handle_paid_order(self, ws, send_msg_func, user_id, chat_id, order_id, item_title=""):
         """当检测到等待卖家发货时触发"""
         logger.info(f"⚡ 开始触发自动发货处理: 买家={user_id}, 会话={chat_id}, 订单号={order_id}")
+
+        # 幂等：同一订单的「待发货」事件可能被推送多次，已发过就不再发消息、不再确认
+        if self.already_delivered(order_id):
+            logger.info(f"订单 {order_id} 已有发货记录，跳过重复处理")
+            return True
         
         rule = self.match_rule(item_title)
         if not rule:
@@ -102,10 +118,10 @@ class AutoDeliveryManager:
             card = self.pop_card_key_atomic(keyword, order_id)
             if card:
                 content_parts.append(f"【您的专属卡密/激活码】：\n{card}")
-                logger.info(f"🎫 从卡密池为订单 {order_id} 抽取并核销卡密: {card}")
+                logger.info(f"🎫 已为订单 {order_id} 核销 1 张卡密（长度 {len(card)}）")
             else:
                 logger.error(f"🔴 卡密池库存不足！关键词: {keyword}")
-                content_parts.append("【专属卡密】：⚠️ 当前卡密正在火速补货中，店主已收到通知，会第一时间补发给您！")
+                content_parts.append("【专属卡密】：⚠️ 当前卡密正在火速补货中，店主会尽快补发给您！")
 
         if not content_parts:
             logger.warning(f"⚠️ 规则 [{keyword}] 未配置任何发货内容")
