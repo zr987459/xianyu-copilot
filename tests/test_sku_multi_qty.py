@@ -235,3 +235,20 @@ def test_api_sku_flow(client):
     stock = client.get("/api/cards/stock", params={"keyword": "QQ音乐"}).json()["stock"]
     assert {(s["sku"], s["unused"], s["used"]) for s in stock} == {("", 1, 0), ("季卡", 0, 2)}
     assert client.post("/api/cards/claim", json={"keyword": "QQ音乐", "order_id": "y", "quantity": 51}).status_code == 422
+
+
+def test_manager_quantity_locked_on_repush(db):
+    """重推事件件数变大不能放大出库：补货后仍只补到首单件数。"""
+    _rule(db); m = _manager(db); sent = []
+    assert _run(m, sent, order_id="Q1", sku_desc="年卡", quantity=6) is False  # 年卡只有 5 张
+    assert m.get_order("Q1")["quantity"] == 6
+    assert _run(m, sent, order_id="Q1", order_payload={"buyAmount": 40}) is False
+    assert m.get_order("Q1")["quantity"] == 6
+    c = sqlite3.connect(db)
+    c.executemany("INSERT INTO card_keys(keyword, sku, card_content) VALUES ('网易云音乐','年卡',?)",
+                  [(f"YY{i}",) for i in range(10)])
+    c.commit(); c.close()
+    assert _run(m, sent, order_id="Q1") is True
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM card_keys WHERE order_id='Q1'").fetchone()[0] == 6
+    c.close()

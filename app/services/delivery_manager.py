@@ -224,7 +224,16 @@ class AutoDeliveryManager:
             quantity = quantity if quantity and quantity > 1 else p_qty
         if prev:  # 重跑时沿用首单记录，防止重推事件里数量/规格丢失
             sku_desc = sku_desc or prev["sku_desc"]
-            quantity = max(int(quantity or 1), int(prev["quantity"] or 1))
+            # 件数以首单记录为准、一经写入即锁定：重推事件里的件数可能误读/被篡改，
+            # 若取 max，补货后会按放大的件数继续给同一订单出卡（掏空库存）
+            locked = int(prev["quantity"] or 1)
+            try:
+                incoming = int(quantity or 1)
+            except (TypeError, ValueError):
+                incoming = locked
+            if incoming not in (1, locked):
+                logger.warning(f"订单 ***{tail} 重推事件件数 {incoming} 与首单 {locked} 不一致，按首单处理")
+            quantity = locked
             item_title = item_title or prev["item_title"] or ""
             user_id = user_id or prev["user_id"]
             chat_id = chat_id or prev["chat_id"]
