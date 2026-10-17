@@ -23,6 +23,8 @@
       }
     }
   </script>
+  <link rel="stylesheet" href="/static/ui-kit.css">
+  <script src="/static/ui-kit.js"></script>
   <style>
     body {
       background-color: #F1F5F9;
@@ -66,7 +68,7 @@
   <main class="flex-1 overflow-y-auto no-scrollbar relative bg-slate-50" id="main-scroll">
     
     <!-- ==================== TAB 1: 消息 (Messages) ==================== -->
-    <div id="tab-messages" class="tab-pane block p-4 space-y-3 pb-24">
+    <div id="tab-messages" class="tab-pane block p-4 space-y-3 has-glass-tabbar">
       <!-- 搜索栏 -->
       <div class="relative">
         <i data-lucide="search" class="w-4 h-4 absolute left-3 top-3 text-slate-400"></i>
@@ -84,7 +86,7 @@
     </div>
 
     <!-- ==================== TAB 2: 订单 (Orders) ==================== -->
-    <div id="tab-orders" class="tab-pane hidden p-4 space-y-3 pb-24">
+    <div id="tab-orders" class="tab-pane hidden p-4 space-y-3 has-glass-tabbar">
       <!-- 订单状态过滤器 -->
       <div class="flex bg-slate-200/80 p-1 rounded-xl text-xs font-medium text-slate-600">
         <button onclick="filterOrderTab('all')" id="btn-ord-all" class="flex-1 py-1.5 rounded-lg bg-white text-slate-900 shadow-sm transition">全部</button>
@@ -103,7 +105,7 @@
     </div>
 
     <!-- ==================== TAB 3: 商品与发货 (Products & Delivery) ==================== -->
-    <div id="tab-products" class="tab-pane hidden p-4 space-y-3 pb-24">
+    <div id="tab-products" class="tab-pane hidden p-4 space-y-3 has-glass-tabbar">
       <!-- 三段式顶部切换 -->
       <div class="flex border-b border-slate-200 bg-white -mx-4 -mt-4 px-4 pt-2">
         <button onclick="switchSubTab('cards')" id="subtab-cards" class="flex-1 py-2.5 text-xs font-semibold text-brand border-b-2 border-brand transition">🎫 卡密资产池</button>
@@ -214,7 +216,7 @@
     </div>
 
     <!-- ==================== TAB 4: 我的与设置 (Mine & Settings) ==================== -->
-    <div id="tab-settings" class="tab-pane hidden p-4 space-y-3 pb-24">
+    <div id="tab-settings" class="tab-pane hidden p-4 space-y-3 has-glass-tabbar">
       <!-- 账号信息卡片 (借鉴 xianyu-mobile 用户卡片) -->
       <div class="bg-gradient-to-r from-brand to-brand-dark p-4 rounded-2xl text-white shadow-md relative overflow-hidden">
         <div class="relative z-10 flex items-center space-x-3">
@@ -274,7 +276,7 @@
   </main>
 
   <!-- 底部固定 4 大导航 Tab (对齐 xianyu-mobile 4 大 Tab) -->
-  <nav class="bg-white border-t border-slate-200 fixed bottom-0 left-0 right-0 z-30 safe-bottom">
+  <nav class="glass-tabbar">
     <div class="flex justify-around items-center h-14">
       <button onclick="switchTab('messages')" id="nav-messages" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-brand transition active:scale-90">
         <i data-lucide="message-circle" class="w-5 h-5 mb-0.5"></i>
@@ -315,6 +317,8 @@
   </div>
 
   <script>
+    const esc = UI.esc;   // 所有动态内容进 innerHTML 前必须 esc()
+    const api = UI.api;   // 带管理令牌的 fetch
     // Tab 切换逻辑
     function switchTab(name) {
       document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
@@ -327,6 +331,8 @@
       const activeBtn = document.getElementById('nav-' + name);
       activeBtn.classList.remove('text-slate-400', 'font-medium');
       activeBtn.classList.add('text-brand', 'font-semibold');
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('is-active', b === activeBtn));
+      UI.haptic();
 
       if (name === 'messages') loadChats();
       if (name === 'orders') loadOrders();
@@ -359,7 +365,7 @@
     // 统计数据
     async function loadStats() {
       try {
-        const res = await fetch('/api/stats').then(r => r.json());
+        const res = await api('/api/stats').then(r => r.json());
         document.getElementById('stat-chats').innerText = res.total_msgs || 0;
         document.getElementById('stat-items-count').innerText = res.total_items || 0;
         document.getElementById('stat-cards-count').innerText = res.available_cards || 0;
@@ -374,7 +380,7 @@
     async function loadChats() {
       const box = document.getElementById('chat-list-container');
       try {
-        const res = await fetch('/api/chats').then(r => r.json());
+        const res = await api('/api/chats').then(r => r.json());
         allChats = res.chats || [];
         renderChatList(allChats);
       } catch (e) {
@@ -391,17 +397,17 @@
       let html = '';
       list.forEach(c => {
         html += `
-          <div onclick="openChatModal('${c.user_id}', '${c.item_id}')" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
+          <div data-user="${esc(c.user_id)}" data-item="${esc(c.item_id)}" onclick="openChatModal(this.dataset.user, this.dataset.item)" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
             <div class="flex items-center space-x-3 min-w-0">
               <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs shrink-0">
-                ${c.user_id.slice(-2)}
+                ${esc(c.user_id.slice(-2))}
               </div>
               <div class="min-w-0">
                 <div class="flex items-center space-x-1.5">
-                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${c.user_id.slice(-6)}</span>
+                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${esc(c.user_id.slice(-6))}</span>
                   ${c.bargain_count > 0 ? `<span class="bg-rose-50 text-rose-600 text-[10px] px-1.5 py-0.5 rounded font-medium">砍价 ${c.bargain_count} 轮</span>` : ''}
                 </div>
-                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${c.last_content}</p>
+                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${esc(c.last_content)}</p>
               </div>
             </div>
             <div class="text-right shrink-0">
@@ -434,14 +440,14 @@
       body.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">加载聊天记录...</div>';
       document.getElementById('chat-modal').classList.remove('hidden');
 
-      const res = await fetch(`/api/chat/messages?user_id=${userId}&item_id=${itemId}`).then(r => r.json());
+      const res = await api(`/api/chat/messages?user_id=${encodeURIComponent(userId)}&item_id=${encodeURIComponent(itemId)}`).then(r => r.json());
       let html = '';
       (res.messages || []).forEach(m => {
         const isMe = m.role === 'assistant';
         html += `
           <div class="flex ${isMe ? 'justify-end' : 'justify-start'}">
             <div class="max-w-[75%] px-3 py-2 rounded-2xl text-xs leading-relaxed ${isMe ? 'bg-brand text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none'} shadow-xs">
-              ${m.content}
+              ${esc(m.content)}
             </div>
           </div>
         `;
@@ -458,7 +464,7 @@
     // 订单
     async function loadOrders() {
       const box = document.getElementById('orders-list-container');
-      const res = await fetch('/api/delivery/logs').then(r => r.json());
+      const res = await api('/api/delivery/logs').then(r => r.json());
       const logs = res.logs || [];
       if (logs.length === 0) {
         box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无发货订单记录</div>';
@@ -469,12 +475,12 @@
         html += `
           <div class="bg-white p-3 rounded-xl border border-slate-200 space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-bold text-slate-800">单号: ${l.order_id || '自动发货'}</span>
-              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold">${l.confirm_status || '已发货'}</span>
+              <span class="font-bold text-slate-800">单号: ${esc(l.order_id || '自动发货')}</span>
+              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold">${esc(l.confirm_status || '已发货')}</span>
             </div>
-            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${l.delivery_content}</p>
+            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${esc(l.delivery_content)}</p>
             <div class="flex items-center justify-between text-[10px] text-slate-400">
-              <span>买家: ${l.user_id ? l.user_id.slice(-6) : '-'}</span>
+              <span>买家: ${esc(l.user_id ? l.user_id.slice(-6) : '-')}</span>
               <span>${l.created_at ? l.created_at.slice(5, 16) : ''}</span>
             </div>
           </div>
@@ -506,7 +512,7 @@
       const kw = document.getElementById('card-input-keyword').value.trim();
       const content = document.getElementById('card-input-single').value.trim();
       if (!kw || !content) { alert('请填写商品关键词和卡密！'); return; }
-      const res = await fetch('/api/cards/add', {
+      const res = await api('/api/cards/add', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ keyword: kw, card_content: content })
@@ -523,7 +529,7 @@
       const kw = document.getElementById('card-input-keyword').value.trim();
       const raw = document.getElementById('card-input-batch').value.trim();
       if (!kw || !raw) { alert('请填写商品关键词和多行卡密！'); return; }
-      const res = await fetch('/api/cards/import', {
+      const res = await api('/api/cards/import', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ keyword: kw, raw_keys: raw })
@@ -550,7 +556,7 @@
 
     async function loadCardsStock() {
       const box = document.getElementById('card-table-list');
-      const res = await fetch(`/api/cards/list?status=${cardTableFilter}`).then(r => r.json());
+      const res = await api(`/api/cards/list?status=${cardTableFilter}`).then(r => r.json());
       const cards = res.cards || [];
       if (cards.length === 0) {
         box.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">暂无对应状态的卡密记录</div>';
@@ -563,12 +569,12 @@
           <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between text-xs">
             <div class="min-w-0 pr-2">
               <div class="flex items-center space-x-1.5">
-                <span class="font-bold text-slate-900 truncate">[${c.keyword}]</span>
+                <span class="font-bold text-slate-900 truncate">[${esc(c.keyword)}]</span>
                 <span class="${isUsed ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold">
                   ${isUsed ? '🔴 已发' : '🟢 在库就绪'}
                 </span>
               </div>
-              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${c.card_content}</p>
+              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${esc(c.card_content)}</p>
             </div>
             <div class="shrink-0 text-right">
               <button onclick="delCardItem(${c.id})" class="text-rose-500 text-[10px] hover:underline">删除</button>
@@ -581,7 +587,7 @@
 
     async function delCardItem(id) {
       if (!confirm('确认删除此卡密？')) return;
-      await fetch(`/api/cards/${id}`, { method: 'DELETE' });
+      await api(`/api/cards/${id}`, { method: 'DELETE' });
       loadCardsStock();
       loadStats();
     }
@@ -593,7 +599,7 @@
       const fixed = document.getElementById('rule-fixed-text').value.trim();
       if (!kw) { alert('请输入关键词！'); return; }
       if (!usePool && !fixed) { alert('必须至少选择一种发货方式！'); return; }
-      await fetch('/api/delivery/rules', {
+      await api('/api/delivery/rules', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ keyword: kw, use_card_pool: usePool, delivery_content: fixed })
@@ -606,7 +612,7 @@
 
     async function loadDeliveryRules() {
       const box = document.getElementById('rules-card-list');
-      const res = await fetch('/api/delivery/rules').then(r => r.json());
+      const res = await api('/api/delivery/rules').then(r => r.json());
       const rules = res.rules || [];
       if (rules.length === 0) {
         box.innerHTML = '<div class="text-center py-6 text-xs text-slate-400">暂无发货规则，请在上方添加</div>';
@@ -617,14 +623,14 @@
         html += `
           <div class="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
             <div class="flex items-center justify-between font-bold">
-              <span class="text-slate-900">${r.keyword}</span>
+              <span class="text-slate-900">${esc(r.keyword)}</span>
               <button onclick="delRuleItem(${r.id})" class="text-rose-500 text-[11px]">删除</button>
             </div>
             <div class="flex items-center space-x-1.5">
               ${r.use_card_pool ? `<span class="bg-blue-50 text-brand px-1.5 py-0.5 rounded text-[10px] font-semibold">🎫 卡密池 (剩余 ${r.card_stock})</span>` : ''}
               ${r.delivery_content ? `<span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]">🔗 固定说明/网盘</span>` : ''}
             </div>
-            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${r.delivery_content}</p>` : ''}
+            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${esc(r.delivery_content)}</p>` : ''}
           </div>
         `;
       });
@@ -633,7 +639,7 @@
 
     async function delRuleItem(id) {
       if (!confirm('确认删除该发货规则？')) return;
-      await fetch(`/api/delivery/rules/${id}`, { method: 'DELETE' });
+      await api(`/api/delivery/rules/${id}`, { method: 'DELETE' });
       loadDeliveryRules();
     }
 
@@ -664,7 +670,7 @@
       }
 
       try {
-        const res = await fetch('/api/publish/item', {
+        const res = await api('/api/publish/item', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
@@ -698,7 +704,7 @@
 
     async function loadPublishedItems() {
       const box = document.getElementById('published-items-list');
-      const res = await fetch('/api/publish/list').then(r => r.json());
+      const res = await api('/api/publish/list').then(r => r.json());
       const items = res.items || [];
       if (items.length === 0) {
         box.innerHTML = '<div class="text-center py-4 text-slate-400">暂无已上架商品记录</div>';
@@ -708,10 +714,10 @@
       items.forEach(it => {
         html += `
           <div class="p-2 bg-slate-50 rounded-lg flex items-center justify-between">
-            <span class="font-bold truncate max-w-[200px]">${it.title}</span>
+            <span class="font-bold truncate max-w-[200px]">${esc(it.title)}</span>
             <div class="flex items-center space-x-2">
-              <span class="font-bold text-brand">¥${it.price}</span>
-              ${it.url ? `<a href="${it.url}" target="_blank" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
+              <span class="font-bold text-brand">¥${esc(it.price)}</span>
+              ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
             </div>
           </div>
         `;
@@ -727,12 +733,12 @@
 
     // 设置与 Prompt
     async function loadSettings() {
-      const pRes = await fetch('/api/prompts').then(r => r.json());
+      const pRes = await api('/api/prompts').then(r => r.json());
       if (pRes.prompts) {
         document.getElementById('setting-prompt-price').value = pRes.prompts.price_prompt || '';
         document.getElementById('setting-prompt-default').value = pRes.prompts.default_prompt || '';
       }
-      const cRes = await fetch('/api/config').then(r => r.json());
+      const cRes = await api('/api/config').then(r => r.json());
       document.getElementById('sys-env-pre').innerText = JSON.stringify(cRes.config || {}, null, 2);
     }
 
@@ -741,7 +747,7 @@
         price_prompt: document.getElementById('setting-prompt-price').value,
         default_prompt: document.getElementById('setting-prompt-default').value
       };
-      await fetch('/api/prompts', {
+      await api('/api/prompts', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)

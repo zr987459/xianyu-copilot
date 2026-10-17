@@ -7,19 +7,26 @@ from pydantic import BaseModel
 from typing import Optional, List
 import base64
 
-from app.db.database import get_db, init_db
+from app.db.database import get_db, init_db, write_tx
 from app.services.publisher_service import XianyuPublisherService
 from app.services.XianyuApis import XianyuApis
+from app.api.security import admin_auth_middleware, mask_card
 
 app = FastAPI(title="Xianyu Copilot API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 前端与 API 同源，默认不开跨域；确需跨域时在 .env 里显式列出 CORS_ORIGINS（逗号分隔）
+_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+app.middleware("http")(admin_auth_middleware)
+
+PROMPT_NAMES = ("classify_prompt", "price_prompt", "tech_prompt", "default_prompt")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
@@ -52,7 +59,7 @@ def get_stats():
     total_users = c.execute("SELECT count(distinct user_id) as count FROM messages").fetchone()['count']
     total_items = c.execute("SELECT count(*) as count FROM published_items").fetchone()['count']
     total_delivered = c.execute("SELECT count(*) as count FROM delivery_logs").fetchone()['count']
-    available_cards = c.execute("SELECT count(*) as count FROM card_keys WHERE is_used=0").fetchone()['count']
+    available_cards = c.execute("SELECT count(*) as count FROM card_keys WHERE status='available'").fetchone()['count']
     used_cards = c.execute("SELECT count(*) as count FROM card_keys WHERE is_used=1").fetchone()['count']
     conn.close()
     return {
@@ -140,7 +147,7 @@ def get_delivery_rules():
         stock_info = c.execute("""
             SELECT 
                 COUNT(*) as total,
-                SUM(CASE WHEN is_used=0 THEN 1 ELSE 0 END) as unused,
+                SUM(CASE WHEN status='available' THEN 1 ELSE 0 END) as unused,
                 SUM(CASE WHEN is_used=1 THEN 1 ELSE 0 END) as used
             FROM card_keys WHERE keyword=?
         """, (item['keyword'],)).fetchone()
@@ -195,14 +202,15 @@ def import_cards(data: BatchCardImport):
     lines = [line.strip() for line in data.raw_keys.split('\n') if line.strip()]
     conn = get_db()
     c = conn.cursor()
-    for card in lines:
-        c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)", (data.keyword.strip(), card))
+    with write_tx(conn):  # 批量导入一个事务，失败整体回滚
+        for card in lines:
+            c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)", (data.keyword.strip(), card))
     conn.commit()
     conn.close()
     return {"success": True, "count": len(lines)}
 
 @app.get("/api/cards/list")
-def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
+def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all", reveal: bool = False):
     conn = get_db()
     c = conn.cursor()
     query = "SELECT * FROM card_keys WHERE 1=1"
@@ -211,22 +219,41 @@ def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
         query += " AND keyword=?"
         params.append(keyword)
     if status == 'unused':
-        query += " AND is_used=0"
+        query += " AND status='available'"
     elif status == 'used':
         query += " AND is_used=1"
     query += " ORDER BY id DESC LIMIT 200"
     rows = c.execute(query, params).fetchall()
     conn.close()
-    return {"cards": [dict(r) for r in rows]}
+    cards = [dict(r) for r in rows]
+    if not reveal:  # 列表默认脱敏，明文只在单独点击"查看"时返回
+        for card in cards:
+            card["card_content"] = mask_card(card["card_content"])
+    return {"cards": cards}
 
 @app.delete("/api/cards/{card_id}")
 def delete_card(card_id: int):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM card_keys WHERE id=?", (card_id,))
+    # 已占用/已发出的卡不允许物理删除，避免订单对不上账
+    c.execute("DELETE FROM card_keys WHERE id=? AND status='available'", (card_id,))
     conn.commit()
     conn.close()
     return {"success": True}
+
+@app.get("/api/delivery/orders")
+def get_delivery_orders(state: Optional[str] = None):
+    conn = get_db()
+    q, p = "SELECT order_id,buyer_id,chat_id,item_id,keyword,state,attempts,last_error,created_at,updated_at FROM delivery_orders", []
+    if state:
+        q += " WHERE state=?"; p.append(state)
+    rows = conn.execute(q + " ORDER BY updated_at DESC LIMIT 100", p).fetchall()
+    conn.close()
+    return {"orders": [dict(r) for r in rows]}
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 @app.get("/api/delivery/logs")
 def get_delivery_logs():
@@ -292,6 +319,10 @@ def get_prompts():
 
 @app.post("/api/prompts")
 def save_prompts(data: dict):
+    # 白名单：防止 name="../../.env" 之类的路径穿越写任意文件
+    bad = [k for k in data if k not in PROMPT_NAMES or not isinstance(data[k], str)]
+    if bad:
+        return JSONResponse({"success": False, "detail": f"非法字段: {bad}"}, status_code=400)
     for name, content in data.items():
         path = os.path.join(PROMPTS_DIR, f"{name}.txt")
         with open(path, "w", encoding="utf-8") as fp:

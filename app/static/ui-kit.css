@@ -1,0 +1,82 @@
+/* Xianyu Copilot UI Kit —— 仿原生交互层（无构建、无依赖，配合 Tailwind CDN 使用） */
+:root{
+  --brand:#2563EB; --tab-h:56px;
+  --safe-b:env(safe-area-inset-bottom,0px); --safe-t:env(safe-area-inset-top,0px);
+  --ease-ios:cubic-bezier(.32,.72,0,1);
+}
+html,body{overscroll-behavior:none;}
+body{-webkit-font-smoothing:antialiased;}
+button,a{touch-action:manipulation;}
+
+/* ---------- 1. 毛玻璃底部 TabBar ---------- */
+.glass-tabbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:30;
+  padding-bottom:var(--safe-b);
+  background:rgba(255,255,255,.72);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);
+  border-top:.5px solid rgba(15,23,42,.12);
+}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .glass-tabbar{background:rgba(255,255,255,.97);}
+}
+.glass-tabbar .nav-btn{position:relative;}
+.glass-tabbar .nav-btn i{transition:transform .25s var(--ease-ios);}
+.glass-tabbar .nav-btn.is-active i{transform:translateY(-1px) scale(1.08);}
+.glass-tabbar .badge{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;
+  border-radius:8px;background:#EF4444;color:#fff;font-size:10px;line-height:16px;text-align:center;font-weight:600;}
+/* 内容区为毛玻璃留出空间，内容可从玻璃下方透出 */
+.has-glass-tabbar{padding-bottom:calc(var(--tab-h) + var(--safe-b) + 12px)!important;}
+
+/* ---------- 2. 左滑操作 Swipe-to-Action ---------- */
+.swipe-row{position:relative;overflow:hidden;border-radius:12px;touch-action:pan-y;}
+.swipe-row__actions{position:absolute;inset:0 0 0 auto;display:flex;}
+.swipe-row__actions button{width:72px;color:#fff;font-size:12px;font-weight:600;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;}
+.swipe-row__content{position:relative;z-index:1;background:#fff;will-change:transform;
+  transition:transform .3s var(--ease-ios);}
+.swipe-row.is-dragging .swipe-row__content{transition:none;}
+
+/* ---------- 3. 底部抽屉（支持下拉关闭） ---------- */
+.sheet-mask{position:fixed;inset:0;z-index:50;background:rgba(15,23,42,.4);opacity:0;transition:opacity .3s;}
+.sheet-mask.is-open{opacity:1;}
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:51;height:88vh;display:flex;flex-direction:column;
+  background:#F8FAFC;border-radius:16px 16px 0 0;transform:translateY(100%);
+  transition:transform .35s var(--ease-ios);padding-bottom:var(--safe-b);}
+.sheet.is-open{transform:translateY(0);}
+.sheet__grabber{width:36px;height:5px;border-radius:3px;background:#CBD5E1;margin:8px auto 4px;flex-shrink:0;}
+
+/* ---------- 4. 对话内浮动宝贝卡片 ---------- */
+.item-float{position:sticky;top:0;z-index:5;margin:0 -12px 8px;padding:8px 12px;
+  background:rgba(248,250,252,.8);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);
+  border-bottom:.5px solid rgba(15,23,42,.08);transition:padding .2s;}
+.item-float__card{display:flex;gap:10px;align-items:center;background:#fff;border-radius:12px;padding:8px;
+  box-shadow:0 1px 2px rgba(15,23,42,.06),0 4px 12px rgba(15,23,42,.04);}
+.item-float__pic{width:48px;height:48px;border-radius:8px;object-fit:cover;background:#E2E8F0;flex-shrink:0;}
+.item-float.is-compact .item-float__pic{width:32px;height:32px;}
+.item-float.is-compact .item-float__desc{display:none;}
+
+/* ---------- 5. AI 思考链折叠 ---------- */
+.thinking{margin:4px 0 2px;max-width:80%;align-self:flex-end;font-size:11px;color:#64748B;}
+.thinking summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;
+  padding:3px 8px;border-radius:999px;background:#EEF2FF;color:#4F46E5;font-weight:600;}
+.thinking summary::-webkit-details-marker{display:none;}
+.thinking summary .chev{transition:transform .2s;}
+.thinking[open] summary .chev{transform:rotate(90deg);}
+.thinking__steps{margin-top:6px;padding:8px 10px;border-left:2px solid #C7D2FE;background:#fff;border-radius:0 8px 8px 0;}
+.thinking__step{display:flex;gap:6px;padding:2px 0;}
+.thinking__step b{color:#334155;font-weight:600;white-space:nowrap;}
+.thinking.is-streaming summary::after{content:"";width:6px;height:6px;border-radius:50%;background:#6366F1;
+  animation:pulse 1s infinite;}
+@keyframes pulse{50%{opacity:.25}}
+
+/* ---------- 6. 下拉刷新 / 骨架屏 / Toast ---------- */
+.ptr{height:0;overflow:hidden;display:flex;align-items:flex-end;justify-content:center;font-size:11px;color:#94A3B8;}
+.skeleton{background:linear-gradient(90deg,#E2E8F0 25%,#F1F5F9 37%,#E2E8F0 63%);background-size:400% 100%;
+  animation:sk 1.4s ease infinite;border-radius:8px;}
+@keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
+.toast{position:fixed;left:50%;bottom:calc(var(--tab-h) + var(--safe-b) + 20px);transform:translateX(-50%);
+  z-index:60;background:rgba(15,23,42,.88);color:#fff;font-size:12px;padding:8px 14px;border-radius:999px;
+  animation:toast-in .25s var(--ease-ios);}
+@keyframes toast-in{from{opacity:0;transform:translate(-50%,8px)}}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
