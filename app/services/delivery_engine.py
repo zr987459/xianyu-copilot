@@ -27,8 +27,11 @@ def build_delivery(order_id: str, user_id: str, chat_id: str, item_title: str) -
     try:
         conn.execute("BEGIN IMMEDIATE")  # 写锁，串行化同库并发占卡
         done = conn.execute(
-            "SELECT keyword, delivery_content FROM delivery_logs WHERE order_id=?", (order_id,)
+            "SELECT keyword, delivery_content, confirm_status FROM delivery_logs WHERE order_id=?", (order_id,)
         ).fetchone()
+        if done and done["confirm_status"] == "out_of_stock":  # 补卡后重试：清掉缺货占位再走正常流程
+            conn.execute("DELETE FROM delivery_logs WHERE order_id=? AND confirm_status='out_of_stock'", (order_id,))
+            done = None
         if done:  # 幂等重放：同一订单直接返回上次内容
             conn.execute("COMMIT")
             return {"content": done["delivery_content"], "keyword": done["keyword"],
@@ -71,9 +74,68 @@ def build_delivery(order_id: str, user_id: str, chat_id: str, item_title: str) -
         conn.close()
 
 
-def mark_status(order_id: str, status: str):
-    """状态机：pending -> sent -> confirmed | confirm_failed | out_of_stock"""
+# 状态机：pending ─发消息→ sent ─官方确认→ confirmed
+#                 └失败→ send_failed      └失败→ confirm_failed ─重试→ confirmed
+TRANSITIONS = {
+    "sent": ("pending", "send_failed"),
+    "send_failed": ("pending",),
+    "confirmed": ("sent", "confirm_failed"),
+    "confirm_failed": ("sent", "confirm_failed"),
+}
+
+
+def mark_status(order_id: str, to: str) -> bool:
+    """条件更新 = 乐观锁：只有处于合法前置状态才会迁移，并发重复回调只有一个能成功"""
+    allowed = TRANSITIONS.get(to)
+    if not allowed:
+        raise ValueError(f"非法目标状态 {to}")
     conn = get_db()
-    conn.execute("UPDATE delivery_logs SET confirm_status=? WHERE order_id=?", (status, order_id))
+    try:
+        q = f"UPDATE delivery_logs SET confirm_status=? WHERE order_id=? AND confirm_status IN ({','.join('?' * len(allowed))})"
+        ok = conn.execute(q, (to, order_id, *allowed)).rowcount == 1
+    finally:
+        conn.close()
+    logger.info(f"订单 {order_id} -> {to} {'✓' if ok else '(跳过：状态不匹配)'}")
+    return ok
+
+
+def record_out_of_stock(order_id: str, user_id: str, chat_id: str, keyword: str):
+    """缺货也落一条日志，订单 Tab 可见并可补卡后重试"""
+    conn = get_db()
+    conn.execute(
+        """INSERT OR IGNORE INTO delivery_logs (order_id, user_id, chat_id, keyword, delivery_content, confirm_status)
+           VALUES (?, ?, ?, ?, '', 'out_of_stock')""", (order_id, user_id, chat_id, keyword))
     conn.close()
-    logger.info(f"订单 {order_id} -> {status}")
+
+
+async def deliver_order(order_id: str, user_id: str, chat_id: str, item_title: str, send_message, confirm):
+    """编排入口（由 WSS 订单事件调用）。send_message/confirm 为注入的异步函数，便于测试与替换。"""
+    from app.core import events
+    try:
+        plan = build_delivery(order_id, user_id, chat_id, item_title)
+    except OutOfStock as e:
+        record_out_of_stock(order_id, user_id, chat_id, str(e))
+        events.publish("delivery", {"order_id": order_id, "status": "out_of_stock"})
+        return
+    if plan is None:
+        return
+    if not plan["replay"] or _status(order_id) in ("pending", "send_failed"):
+        try:
+            await send_message(chat_id, user_id, plan["content"])
+            mark_status(order_id, "sent")
+        except Exception as ex:
+            logger.error(f"订单 {order_id} 发货消息失败: {ex}")
+            mark_status(order_id, "send_failed")
+            events.publish("delivery", {"order_id": order_id, "status": "send_failed"})
+            return
+    if plan["auto_confirm"] and _status(order_id) in ("sent", "confirm_failed"):
+        ok, _ = await confirm(order_id)
+        mark_status(order_id, "confirmed" if ok else "confirm_failed")
+    events.publish("delivery", {"order_id": order_id, "status": _status(order_id)})
+
+
+def _status(order_id: str):
+    conn = get_db()
+    row = conn.execute("SELECT confirm_status FROM delivery_logs WHERE order_id=?", (order_id,)).fetchone()
+    conn.close()
+    return row["confirm_status"] if row else None

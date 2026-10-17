@@ -136,13 +136,15 @@ def get_chat_messages(user_id: str, item_id: str):
     conn = get_db()
     c = conn.cursor()
     rows = c.execute("""
-        SELECT id, role, content, timestamp 
-        FROM messages 
+        SELECT id, role, content, meta, timestamp
+        FROM messages
         WHERE user_id=? AND item_id=?
         ORDER BY id ASC
     """, (user_id, item_id)).fetchall()
+    item = c.execute("SELECT item_id, title, price, url FROM published_items WHERE item_id=? ORDER BY id DESC LIMIT 1",
+                     (item_id,)).fetchone()
     conn.close()
-    return {"messages": [dict(r) for r in rows]}
+    return {"messages": [dict(r) for r in rows], "item": dict(item) if item else None}
 
 # --- 发货规则 & 卡密池 Tab ---
 class RuleCreate(BaseModel):
@@ -259,6 +261,18 @@ def get_delivery_logs():
     rows = c.execute("SELECT * FROM delivery_logs ORDER BY id DESC LIMIT 50").fetchall()
     conn.close()
     return {"logs": [dict(r) for r in rows]}
+
+@app.post("/api/orders/{order_id}/retry-confirm")
+async def retry_confirm(order_id: str):
+    from app.services.delivery_engine import mark_status, _status
+    from app.services.delivery_service import XianyuDeliveryService
+    if _status(order_id) not in ("sent", "confirm_failed"):
+        raise HTTPException(409, f"当前状态 {_status(order_id)} 不可重试确认")
+    svc = XianyuDeliveryService(get_publisher_instance().session)
+    ok, msg = await asyncio.to_thread(svc.confirm_dummy_shipping, order_id)
+    mark_status(order_id, "confirmed" if ok else "confirm_failed")
+    events.publish("delivery", {"order_id": order_id, "status": _status(order_id)})
+    return {"success": ok, "message": msg}
 
 # --- 商品上架 Tab ---
 class PublishItemRequest(BaseModel):
