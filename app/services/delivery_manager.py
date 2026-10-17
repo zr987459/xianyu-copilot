@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from loguru import logger
 from app.services.delivery_service import XianyuDeliveryService
+from app.db.cards import claim_card, StockLockError
 
 class AutoDeliveryManager:
     """自动发货管理器 (支持：固定内容、独立卡密、以及两者同时发放的复合模式)"""
@@ -19,8 +20,6 @@ class AutoDeliveryManager:
         c = conn.cursor()
         rules = c.execute("SELECT * FROM auto_delivery_rules WHERE enabled=1").fetchall()
         conn.close()
-        # 最长关键词优先，避免「月卡」抢先匹配「年月卡」之类的歧义
-        rules = sorted(rules, key=lambda r: len((r['keyword'] or '').strip()), reverse=True)
 
         for r in rules:
             kw = r['keyword'].strip()
@@ -35,47 +34,18 @@ class AutoDeliveryManager:
         return None
 
     def pop_card_key_atomic(self, keyword, order_id):
-        """从卡密池中原子提取一张未使用卡密并核销（事务锁防超卖）"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA busy_timeout=5000;")
-            conn.execute("BEGIN IMMEDIATE;")
-            # 若该订单已有分配记录，直接幂等返回
-            hit = conn.execute(
-                "SELECT card_content FROM card_keys WHERE order_id=? LIMIT 1",
-                (order_id,),
-            ).fetchone()
-            if hit:
-                conn.commit()
-                return hit["card_content"]
-
-            row = conn.execute(
-                """
-                UPDATE card_keys
-                   SET is_used=1, order_id=?, used_at=CURRENT_TIMESTAMP
-                 WHERE id = (SELECT id FROM card_keys
-                              WHERE keyword=? AND is_used=0
-                              ORDER BY id ASC LIMIT 1)
-                RETURNING card_content;
-                """,
-                (order_id, keyword),
-            ).fetchone()
-            conn.commit()
-            return row["card_content"] if row else None
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"提取卡密异常: {e}")
-            raise  # 数据库异常不能当成「库存不足」处理
-        finally:
-            conn.close()
+        """委托 app.db.cards.claim_card。缺货返回 None；拿不到锁抛 StockLockError（不能当缺货处理）。"""
+        row = claim_card(self.db_path, keyword, order_id)
+        return row["card_content"] if row else None
 
     def already_delivered(self, order_id):
-        if not order_id:
-            return False
+        """WSS 重推“已付款”事件时，同一订单不再重复发消息、重复确认"""
         conn = sqlite3.connect(self.db_path)
         try:
-            return conn.execute("SELECT 1 FROM delivery_logs WHERE order_id=? LIMIT 1", (order_id,)).fetchone() is not None
+            return conn.execute(
+                "SELECT 1 FROM delivery_logs WHERE order_id=? AND confirm_status NOT LIKE '缺货%' LIMIT 1",
+                (order_id,),
+            ).fetchone() is not None
         finally:
             conn.close()
 
@@ -92,12 +62,14 @@ class AutoDeliveryManager:
     async def handle_paid_order(self, ws, send_msg_func, user_id, chat_id, order_id, item_title=""):
         """当检测到等待卖家发货时触发"""
         logger.info(f"⚡ 开始触发自动发货处理: 买家={user_id}, 会话={chat_id}, 订单号={order_id}")
-
-        # 幂等：同一订单的「待发货」事件可能被推送多次，已发过就不再发消息、不再确认
-        if self.already_delivered(order_id):
-            logger.info(f"订单 {order_id} 已有发货记录，跳过重复处理")
-            return True
         
+        if not order_id:
+            logger.error("⚠️ 付款事件缺少订单号，转人工处理（无单号无法保证一单一卡）")
+            return False
+        if self.already_delivered(order_id):
+            logger.info(f"订单 {order_id[-4:]} 已发过货，忽略重复付款事件")
+            return True
+
         rule = self.match_rule(item_title)
         if not rule:
             logger.warning(f"⚠️ 未找到匹配的自动发货规则 (商品: {item_title})，跳过发货")
@@ -115,13 +87,18 @@ class AutoDeliveryManager:
 
         # 2. 如果开启了卡密池，原子抽取一张专属独享卡密
         if use_card_pool:
-            card = self.pop_card_key_atomic(keyword, order_id)
+            try:
+                card = self.pop_card_key_atomic(keyword, order_id)
+            except StockLockError:
+                logger.warning(f"卡密库繁忙，订单 {order_id[-4:]} 稍后重试（未通知买家）")
+                return False
             if card:
                 content_parts.append(f"【您的专属卡密/激活码】：\n{card}")
-                logger.info(f"🎫 已为订单 {order_id} 核销 1 张卡密（长度 {len(card)}）")
+                # 日志不落卡密明文，只记长度
+                logger.info(f"🎫 订单 ***{order_id[-4:]} 已绑定卡密（{len(card)} 字符）")
             else:
                 logger.error(f"🔴 卡密池库存不足！关键词: {keyword}")
-                content_parts.append("【专属卡密】：⚠️ 当前卡密正在火速补货中，店主会尽快补发给您！")
+                content_parts.append("【专属卡密】：⚠️ 当前卡密正在火速补货中，店主已收到通知，会第一时间补发给您！")
 
         if not content_parts:
             logger.warning(f"⚠️ 规则 [{keyword}] 未配置任何发货内容")
@@ -140,6 +117,9 @@ class AutoDeliveryManager:
             logger.info(f"🚀 正在调用闲鱼官方无需物流接口自动确认发货 (订单: {order_id})...")
             success, msg = self.delivery_service.confirm_dummy_shipping(order_id, trade_text="虚拟商品已自动交付")
             confirm_status = "成功" if success else f"失败: {msg}"
+
+        if "正在火速补货" in delivery_text:
+            confirm_status = "缺货待补发"
 
         # 4. 记录日志
         self.record_log(order_id, user_id, chat_id, keyword, delivery_text, confirm_status)
