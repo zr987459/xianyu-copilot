@@ -18,13 +18,25 @@ def admin_token() -> str:
     return os.getenv("ADMIN_TOKEN", "").strip()
 
 
+def is_local_or_private(host: str) -> bool:
+    if not host:
+        return True
+    return (
+        host in LOCAL_HOSTS
+        or host.startswith("127.")
+        or host.startswith("10.")
+        or host.startswith("192.168.")
+        or host.startswith("172.")
+    )
+
+
 class AdminAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not request.url.path.startswith("/api/") or request.method == "OPTIONS":
             return await call_next(request)
         token = admin_token()
         if not token:
-            direct_local = (request.client and request.client.host in LOCAL_HOSTS
+            direct_local = (request.client and is_local_or_private(request.client.host)
                             and "x-forwarded-for" not in request.headers)
             if direct_local:
                 return await call_next(request)
