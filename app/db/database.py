@@ -5,8 +5,10 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__)
 
 def get_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)  # autocommit，事务显式 BEGIN
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")      # 读写并发，UI 轮询不阻塞发货
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 def init_db():
@@ -80,5 +82,16 @@ def init_db():
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     ''')
-    conn.commit()
+    # 复合发货：一单只发一次（幂等），一卡只给一单（独享）
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_delivery_order ON delivery_logs(order_id)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_card_order ON card_keys(order_id) WHERE order_id IS NOT NULL")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_card_content ON card_keys(keyword, card_content)")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_card_pick ON card_keys(keyword, is_used, id)")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_msg_chat ON messages(user_id, item_id, id)")
+    _add_column(c, "messages", "meta", "TEXT")  # AI 决策依据 JSON（仅卖家可见）
     conn.close()
+
+def _add_column(c, table, col, ddl):
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+    if col not in cols:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")

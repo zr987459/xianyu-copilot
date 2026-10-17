@@ -180,11 +180,10 @@ class SingleCardCreate(BaseModel):
 def add_single_card(data: SingleCardCreate):
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-              (data.keyword.strip(), data.card_content.strip()))
-    conn.commit()
+    cur = c.execute("INSERT OR IGNORE INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+                    (data.keyword.strip(), data.card_content.strip()))
     conn.close()
-    return {"success": True}
+    return {"success": cur.rowcount == 1, "duplicate": cur.rowcount == 0}
 
 class BatchCardImport(BaseModel):
     keyword: str
@@ -195,11 +194,14 @@ def import_cards(data: BatchCardImport):
     lines = [line.strip() for line in data.raw_keys.split('\n') if line.strip()]
     conn = get_db()
     c = conn.cursor()
-    for card in lines:
-        c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)", (data.keyword.strip(), card))
-    conn.commit()
+    c.execute("BEGIN")
+    inserted = 0
+    for card in dict.fromkeys(lines):  # 去重保序
+        inserted += c.execute("INSERT OR IGNORE INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+                              (data.keyword.strip(), card)).rowcount
+    c.execute("COMMIT")
     conn.close()
-    return {"success": True, "count": len(lines)}
+    return {"success": True, "count": inserted, "skipped": len(lines) - inserted}
 
 @app.get("/api/cards/list")
 def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
@@ -223,7 +225,7 @@ def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
 def delete_card(card_id: int):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM card_keys WHERE id=?", (card_id,))
+    c.execute("DELETE FROM card_keys WHERE id=? AND is_used=0", (card_id,))  # 已核销卡密保留审计
     conn.commit()
     conn.close()
     return {"success": True}
