@@ -9,6 +9,26 @@
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
   <script>
+    // —— 管理口令：给同源 /api/* 请求自动带 Bearer；401 时重新询问 ——
+    (function () {
+      const KEY = 'xy_admin_token';
+      const raw = window.fetch.bind(window);
+      window.fetch = async function (input, init = {}) {
+        const url = typeof input === 'string' ? input : input.url;
+        if (!url.startsWith('/api/')) return raw(input, init);
+        const headers = new Headers(init.headers || {});
+        const t = localStorage.getItem(KEY);
+        if (t) headers.set('Authorization', 'Bearer ' + t);
+        const res = await raw(input, { ...init, headers });
+        if (res.status === 401 && !window.__xyAsking) {
+          window.__xyAsking = true;
+          const v = prompt('请输入管理口令（.env 中的 ADMIN_TOKEN）');
+          window.__xyAsking = false;
+          if (v) { localStorage.setItem(KEY, v.trim()); return window.fetch(input, init); }
+        }
+        return res;
+      };
+    })();
     tailwind.config = {
       theme: {
         extend: {
@@ -71,13 +91,13 @@
     <!-- ==================== TAB 1: 消息 (Messages) ==================== -->
     <div id="tab-messages" class="tab-pane block p-4 space-y-3 pb-24">
       <div class="relative">
-        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-400"></i>
+        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-500"></i>
         <input type="text" id="chat-search" oninput="filterChats()" placeholder="搜索买家昵称、消息内容或商品ID..." 
           class="w-full pl-9 pr-4 py-2 bg-white rounded-xl text-xs border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand shadow-xs">
       </div>
 
       <div id="chat-list-container" class="space-y-2">
-        <div class="text-center py-12 text-slate-400 text-xs flex flex-col items-center">
+        <div class="text-center py-12 text-slate-500 text-xs flex flex-col items-center">
           <i data-lucide="message-square" class="w-8 h-8 mb-2 opacity-40"></i>
           正在同步买家会话流...
         </div>
@@ -93,7 +113,7 @@
       </div>
 
       <div id="orders-list-container" class="space-y-2.5">
-        <div class="text-center py-12 text-slate-400 text-xs flex flex-col items-center">
+        <div class="text-center py-12 text-slate-500 text-xs flex flex-col items-center">
           <i data-lucide="package" class="w-8 h-8 mb-2 opacity-40"></i>
           暂无订单流水
         </div>
@@ -113,11 +133,11 @@
       <div id="subpane-cards" class="space-y-3">
         <div class="grid grid-cols-2 gap-2">
           <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
-            <span class="text-[11px] text-slate-400 block font-medium">在库可用卡密</span>
+            <span class="text-[11px] text-slate-500 block font-medium">在库可用卡密</span>
             <span class="text-xl font-bold text-emerald-600" id="card-stock-val">0</span>
           </div>
           <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
-            <span class="text-[11px] text-slate-400 block font-medium">累计已核销发货</span>
+            <span class="text-[11px] text-slate-500 block font-medium">累计已核销发货</span>
             <span class="text-xl font-bold text-slate-600" id="card-used-val">0</span>
           </div>
         </div>
@@ -228,19 +248,19 @@
       <!-- 4 大指标卡片 -->
       <div class="grid grid-cols-4 gap-2">
         <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">总咨询</span>
+          <span class="text-[10px] text-slate-500 block font-medium">总咨询</span>
           <span class="text-sm font-bold text-slate-900" id="stat-chats">0</span>
         </div>
         <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">在售宝贝</span>
+          <span class="text-[10px] text-slate-500 block font-medium">在售宝贝</span>
           <span class="text-sm font-bold text-slate-900" id="stat-items-count">0</span>
         </div>
         <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">可用卡密</span>
+          <span class="text-[10px] text-slate-500 block font-medium">可用卡密</span>
           <span class="text-sm font-bold text-emerald-600" id="stat-cards-count">0</span>
         </div>
         <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">自动发货</span>
+          <span class="text-[10px] text-slate-500 block font-medium">自动发货</span>
           <span class="text-sm font-bold text-blue-600" id="stat-delivery-count">0</span>
         </div>
       </div>
@@ -276,15 +296,15 @@
         <i data-lucide="message-circle" class="w-5 h-5 mb-0.5"></i>
         <span class="text-[10px] font-semibold">消息</span>
       </button>
-      <button onclick="switchTab('orders')" id="nav-orders" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
+      <button onclick="switchTab('orders')" id="nav-orders" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-500 transition active:scale-90">
         <i data-lucide="clipboard-list" class="w-5 h-5 mb-0.5"></i>
         <span class="text-[10px] font-medium">订单</span>
       </button>
-      <button onclick="switchTab('products')" id="nav-products" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
+      <button onclick="switchTab('products')" id="nav-products" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-500 transition active:scale-90">
         <i data-lucide="tag" class="w-5 h-5 mb-0.5"></i>
         <span class="text-[10px] font-medium">商品发货</span>
       </button>
-      <button onclick="switchTab('settings')" id="nav-settings" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
+      <button onclick="switchTab('settings')" id="nav-settings" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-500 transition active:scale-90">
         <i data-lucide="user" class="w-5 h-5 mb-0.5"></i>
         <span class="text-[10px] font-medium">我的设置</span>
       </button>
@@ -300,10 +320,10 @@
           <div class="w-7 h-7 rounded-full bg-brand text-white flex items-center justify-center text-xs font-bold">👤</div>
           <div>
             <span class="text-xs font-bold text-slate-900 block" id="modal-buyer-title">买家对话</span>
-            <span class="text-[10px] text-slate-400" id="modal-buyer-sub">消息列表</span>
+            <span class="text-[10px] text-slate-500" id="modal-buyer-sub">消息列表</span>
           </div>
         </div>
-        <button onclick="closeChatModal()" class="p-1 text-slate-400 hover:text-slate-700">
+        <button onclick="closeChatModal()" class="p-1 text-slate-500 hover:text-slate-700">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -337,10 +357,10 @@
 
       document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.classList.remove('text-brand', 'font-semibold');
-        btn.classList.add('text-slate-400', 'font-medium');
+        btn.classList.add('text-slate-500', 'font-medium');
       });
       const activeBtn = document.getElementById('nav-' + name);
-      activeBtn.classList.remove('text-slate-400', 'font-medium');
+      activeBtn.classList.remove('text-slate-500', 'font-medium');
       activeBtn.classList.add('text-brand', 'font-semibold');
 
       if (name === 'messages') loadChats();
@@ -393,7 +413,7 @@
         allChats = res.chats || [];
         renderChatList(allChats);
       } catch (e) {
-        box.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">拉取会话流失败</div>';
+        box.innerHTML = '<div class="text-center py-8 text-xs text-slate-500">拉取会话流失败</div>';
       }
     }
 
@@ -401,7 +421,7 @@
       const box = document.getElementById('chat-list-container');
       box.innerHTML = '';
       if (!list || list.length === 0) {
-        box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无买家咨询，AI 正在监听中...</div>';
+        box.innerHTML = '<div class="text-center py-12 text-slate-500 text-xs">暂无买家咨询，AI 正在监听中...</div>';
         return;
       }
       list.forEach(c => {
@@ -434,7 +454,7 @@
         }
 
         const msgP = document.createElement('p');
-        msgP.className = "text-[11px] text-slate-400 truncate mt-0.5";
+        msgP.className = "text-[11px] text-slate-500 truncate mt-0.5";
         msgP.textContent = (c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: ') + (c.last_content || '');
 
         info.appendChild(headerLine);
@@ -445,7 +465,7 @@
         const right = document.createElement('div');
         right.className = "text-right shrink-0";
         const timeSpan = document.createElement('span');
-        timeSpan.className = "text-[10px] text-slate-400";
+        timeSpan.className = "text-[10px] text-slate-500";
         timeSpan.textContent = c.last_time ? c.last_time.slice(11, 16) : '';
         const countSpan = document.createElement('span');
         countSpan.className = "block bg-slate-100 text-slate-600 text-[10px] px-1.5 rounded-full mt-1 font-semibold";
@@ -487,7 +507,7 @@
       }
 
       const body = document.getElementById('modal-chat-body');
-      body.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">正在拉取完整聊天历史...</div>';
+      body.innerHTML = '<div class="text-center py-8 text-xs text-slate-500">正在拉取完整聊天历史...</div>';
       document.getElementById('chat-modal').classList.remove('hidden');
 
       const res = await fetch(`/api/chat/messages?user_id=${encodeURIComponent(userId)}&item_id=${encodeURIComponent(itemId)}`).then(r => r.json());
@@ -513,13 +533,18 @@
     }
 
     // 订单列表
+    // 发货结果分类：缺货待补发 / 确认失败 = 待处理；其余视为已发货
+    let orderFilter = 'all';
+    const isPendingStatus = st => !!st && (st.startsWith('缺货') || st.startsWith('失败'));
     async function loadOrders() {
       const box = document.getElementById('orders-list-container');
       const res = await fetch('/api/delivery/logs').then(r => r.json());
-      const logs = res.logs || [];
+      const logs = (res.logs || []).filter(l =>
+        orderFilter === 'all' ||
+        (orderFilter === 'wait_send' ? isPendingStatus(l.confirm_status) : !isPendingStatus(l.confirm_status)));
       box.innerHTML = '';
       if (logs.length === 0) {
-        box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无发货订单记录</div>';
+        box.innerHTML = '<div class="text-center py-12 text-slate-500 text-xs">暂无发货订单记录</div>';
         return;
       }
       logs.forEach(l => {
@@ -532,7 +557,9 @@
         ordSpan.className = "font-bold text-slate-800";
         ordSpan.textContent = '单号: ' + (l.order_id || '自动发货');
         const stSpan = document.createElement('span');
-        stSpan.className = "text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold";
+        stSpan.className = isPendingStatus(l.confirm_status)
+          ? "text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded font-semibold"
+          : "text-[10px] text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded font-semibold";
         stSpan.textContent = l.confirm_status || '已发货';
         topRow.appendChild(ordSpan);
         topRow.appendChild(stSpan);
@@ -542,7 +569,7 @@
         contentP.textContent = l.delivery_content || '';
 
         const bottomRow = document.createElement('div');
-        bottomRow.className = "flex items-center justify-between text-[10px] text-slate-400";
+        bottomRow.className = "flex items-center justify-between text-[10px] text-slate-500";
         const userSpan = document.createElement('span');
         userSpan.textContent = '买家: ' + (l.user_id ? l.user_id.slice(-6) : '-');
         const timeSpan = document.createElement('span');
@@ -558,6 +585,7 @@
     }
 
     function filterOrderTab(status) {
+      orderFilter = status;
       ['all', 'wait_send', 'delivered'].forEach(s => {
         const btn = document.getElementById('btn-ord-' + s);
         if (btn) {
@@ -631,7 +659,7 @@
       const cards = res.cards || [];
       box.innerHTML = '';
       if (cards.length === 0) {
-        box.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">暂无对应状态的卡密记录</div>';
+        box.innerHTML = '<div class="text-center py-4 text-xs text-slate-500">暂无对应状态的卡密记录</div>';
         return;
       }
       cards.forEach(c => {
@@ -704,7 +732,7 @@
       const rules = res.rules || [];
       box.innerHTML = '';
       if (rules.length === 0) {
-        box.innerHTML = '<div class="text-center py-6 text-xs text-slate-400">暂无发货规则，请在上方添加</div>';
+        box.innerHTML = '<div class="text-center py-6 text-xs text-slate-500">暂无发货规则，请在上方添加</div>';
         return;
       }
       rules.forEach(r => {
@@ -822,7 +850,7 @@
       const items = res.items || [];
       box.innerHTML = '';
       if (items.length === 0) {
-        box.innerHTML = '<div class="text-center py-4 text-slate-400">暂无已上架商品记录</div>';
+        box.innerHTML = '<div class="text-center py-4 text-slate-500">暂无已上架商品记录</div>';
         return;
       }
       items.forEach(it => {
@@ -837,9 +865,11 @@
         pSpan.className = "font-bold text-brand";
         pSpan.textContent = `¥${it.price}`;
         right.appendChild(pSpan);
-        if (it.url) {
+        // 只放行 http(s) 链接，挡住 javascript: 等伪协议
+        if (it.url && /^https?:\/\//i.test(it.url)) {
           const a = document.createElement('a');
           a.href = it.url;
+          a.rel = 'noopener noreferrer';
           a.target = "_blank";
           a.className = "text-blue-500 underline text-[11px]";
           a.textContent = '查看';

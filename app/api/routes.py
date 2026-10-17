@@ -5,16 +5,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 
-from app.db.database import get_db, init_db
+from app.db.database import get_db, init_db, DB_PATH
+from app.db.cards import claim_card as _claim_card, StockLockError
+from app.core.security import AdminAuthMiddleware
 from app.services.publisher_service import XianyuPublisherService
 from app.services.XianyuApis import XianyuApis
 
 app = FastAPI(title="Xianyu Copilot API", version="1.1.0")
 
-_origins = os.getenv("ALLOW_ORIGINS", "*").split(",")
+# 同源访问无需 CORS；只有显式配置 ALLOW_ORIGINS 才放行跨域（不再默认 "*"）
+_origins = os.getenv("ALLOW_ORIGINS", "").split(",")
+app.add_middleware(AdminAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _origins if o.strip()],
+    allow_origins=[o.strip() for o in _origins if o.strip() and o.strip() != "*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
@@ -62,37 +66,9 @@ def startup_event():
 
 # ========= 卡密原子出库（防超卖 / 事务独享） =========
 def claim_card(keyword: str, order_id: str):
-    """原子化提取单张可用卡密，避免高并发重复发放与超卖"""
-    conn = get_db()
-    try:
-        conn.execute("PRAGMA busy_timeout=5000;")
-        conn.execute("BEGIN IMMEDIATE;")
-        # 若该订单已有分配记录，直接返回历史卡密
-        hit = conn.execute(
-            "SELECT card_content FROM card_keys WHERE order_id=? LIMIT 1",
-            (order_id,),
-        ).fetchone()
-        if hit:
-            conn.commit()
-            return dict(hit)
-        row = conn.execute(
-            """
-            UPDATE card_keys
-               SET is_used=1, order_id=?, used_at=CURRENT_TIMESTAMP
-             WHERE id = (SELECT id FROM card_keys
-                          WHERE keyword=? AND is_used=0
-                          ORDER BY id ASC LIMIT 1)
-            RETURNING id, card_content;
-            """,
-            (order_id, keyword),
-        ).fetchone()
-        conn.commit()
-        return dict(row) if row else None
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    """兼容旧调用：委托给 app.db.cards.claim_card（唯一实现）"""
+    from app.db import database
+    return _claim_card(database.DB_PATH, keyword, order_id)
 
 
 class ClaimRequest(BaseModel):
@@ -102,7 +78,12 @@ class ClaimRequest(BaseModel):
 
 @app.post("/api/cards/claim")
 def claim_card_api(data: ClaimRequest):
-    card = claim_card(data.keyword.strip(), data.order_id.strip())
+    try:
+        card = claim_card(data.keyword, data.order_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except StockLockError:
+        raise HTTPException(status_code=503, detail="库存繁忙，请稍后重试")
     if card is None:
         raise HTTPException(status_code=409, detail="库存不足，卡密已被抢空")
     return {"success": True, "card_content": card["card_content"]}
@@ -249,6 +230,8 @@ class SingleCardCreate(BaseModel):
 
 @app.post("/api/cards/add")
 def add_single_card(data: SingleCardCreate):
+    if not data.keyword.strip() or not data.card_content.strip():
+        raise HTTPException(status_code=400, detail="keyword 与 card_content 不能为空")
     conn = get_db()
     conn.execute(
         "INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
@@ -266,12 +249,15 @@ class BatchCardImport(BaseModel):
 
 @app.post("/api/cards/import")
 def import_cards(data: BatchCardImport):
-    lines = [ln.strip() for ln in data.raw_keys.split("\n") if ln.strip()]
+    keyword = data.keyword.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword 不能为空")
+    # 去掉空行与本批重复行，避免同一张卡入库两次被发给两个买家
+    lines = list(dict.fromkeys(ln.strip() for ln in data.raw_keys.splitlines() if ln.strip()))
     conn = get_db()
     c = conn.cursor()
-    for card in lines:
-        c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-                  (data.keyword.strip(), card))
+    c.executemany("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+                  [(keyword, card) for card in lines])
     conn.commit()
     conn.close()
     return {"success": True, "count": len(lines)}

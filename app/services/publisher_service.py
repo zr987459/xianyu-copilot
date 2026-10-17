@@ -5,7 +5,7 @@ from io import BytesIO
 import requests
 from PIL import Image
 from loguru import logger
-from utils.xianyu_utils import generate_sign
+from app.utils.xianyu_utils import generate_sign
 
 class XianyuPublisherService:
     """闲鱼商品上架发布服务 (移植自成熟开源项目方案)"""
