@@ -1,6 +1,11 @@
 import os
 import sys
-from fastapi import FastAPI, Request
+import hmac
+import re
+import asyncio
+import json
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
+from app.core import events
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,13 +18,30 @@ from app.services.XianyuApis import XianyuApis
 
 app = FastAPI(title="Xianyu Copilot API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 默认同源访问；跨域客户端（如独立 App）需显式列在 ALLOWED_ORIGINS
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+def check_token(token: str) -> bool:
+    return bool(ADMIN_TOKEN) and hmac.compare_digest(token or "", ADMIN_TOKEN)
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    """所有 /api/* 需 Bearer 令牌；未配置 ADMIN_TOKEN 时拒绝一切 API，防止裸奔上线"""
+    if request.url.path.startswith("/api/"):
+        auth = request.headers.get("authorization", "")
+        if not check_token(auth.removeprefix("Bearer ").strip()):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
@@ -114,13 +136,15 @@ def get_chat_messages(user_id: str, item_id: str):
     conn = get_db()
     c = conn.cursor()
     rows = c.execute("""
-        SELECT id, role, content, timestamp 
-        FROM messages 
+        SELECT id, role, content, meta, timestamp
+        FROM messages
         WHERE user_id=? AND item_id=?
         ORDER BY id ASC
     """, (user_id, item_id)).fetchall()
+    item = c.execute("SELECT item_id, title, price, url FROM published_items WHERE item_id=? ORDER BY id DESC LIMIT 1",
+                     (item_id,)).fetchone()
     conn.close()
-    return {"messages": [dict(r) for r in rows]}
+    return {"messages": [dict(r) for r in rows], "item": dict(item) if item else None}
 
 # --- 发货规则 & 卡密池 Tab ---
 class RuleCreate(BaseModel):
@@ -180,11 +204,10 @@ class SingleCardCreate(BaseModel):
 def add_single_card(data: SingleCardCreate):
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-              (data.keyword.strip(), data.card_content.strip()))
-    conn.commit()
+    cur = c.execute("INSERT OR IGNORE INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+                    (data.keyword.strip(), data.card_content.strip()))
     conn.close()
-    return {"success": True}
+    return {"success": cur.rowcount == 1, "duplicate": cur.rowcount == 0}
 
 class BatchCardImport(BaseModel):
     keyword: str
@@ -195,11 +218,14 @@ def import_cards(data: BatchCardImport):
     lines = [line.strip() for line in data.raw_keys.split('\n') if line.strip()]
     conn = get_db()
     c = conn.cursor()
-    for card in lines:
-        c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)", (data.keyword.strip(), card))
-    conn.commit()
+    c.execute("BEGIN")
+    inserted = 0
+    for card in dict.fromkeys(lines):  # 去重保序
+        inserted += c.execute("INSERT OR IGNORE INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+                              (data.keyword.strip(), card)).rowcount
+    c.execute("COMMIT")
     conn.close()
-    return {"success": True, "count": len(lines)}
+    return {"success": True, "count": inserted, "skipped": len(lines) - inserted}
 
 @app.get("/api/cards/list")
 def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
@@ -223,7 +249,7 @@ def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
 def delete_card(card_id: int):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM card_keys WHERE id=?", (card_id,))
+    c.execute("DELETE FROM card_keys WHERE id=? AND is_used=0", (card_id,))  # 已核销卡密保留审计
     conn.commit()
     conn.close()
     return {"success": True}
@@ -235,6 +261,18 @@ def get_delivery_logs():
     rows = c.execute("SELECT * FROM delivery_logs ORDER BY id DESC LIMIT 50").fetchall()
     conn.close()
     return {"logs": [dict(r) for r in rows]}
+
+@app.post("/api/orders/{order_id}/retry-confirm")
+async def retry_confirm(order_id: str):
+    from app.services.delivery_engine import mark_status, _status
+    from app.services.delivery_service import XianyuDeliveryService
+    if _status(order_id) not in ("sent", "confirm_failed"):
+        raise HTTPException(409, f"当前状态 {_status(order_id)} 不可重试确认")
+    svc = XianyuDeliveryService(get_publisher_instance().session)
+    ok, msg = await asyncio.to_thread(svc.confirm_dummy_shipping, order_id)
+    mark_status(order_id, "confirmed" if ok else "confirm_failed")
+    events.publish("delivery", {"order_id": order_id, "status": _status(order_id)})
+    return {"success": ok, "message": msg}
 
 # --- 商品上架 Tab ---
 class PublishItemRequest(BaseModel):
@@ -290,8 +328,13 @@ def get_prompts():
                 prompts[f.replace(".txt", "")] = fp.read()
     return {"prompts": prompts}
 
+PROMPT_NAMES = {"classify_prompt", "price_prompt", "tech_prompt", "default_prompt"}
+
 @app.post("/api/prompts")
 def save_prompts(data: dict):
+    bad = [k for k in data if k not in PROMPT_NAMES or not isinstance(data[k], str)]
+    if bad:  # 白名单，阻断 ../ 路径穿越写文件
+        raise HTTPException(400, f"invalid prompt names: {bad}")
     for name, content in data.items():
         path = os.path.join(PROMPTS_DIR, f"{name}.txt")
         with open(path, "w", encoding="utf-8") as fp:
@@ -312,3 +355,34 @@ def get_config():
                     elif k == "API_KEY":
                         cfg[k] = v[:6] + "..." + v[-4:] if len(v) > 10 else "***"
     return {"config": cfg}
+
+
+# --- 实时通道 ---
+@app.websocket("/ws/events")
+async def ws_events(ws: WebSocket):
+    """协议：连上后 5s 内发 {"auth": token, "since": lastSeq}；服务端 25s 一次 ping。
+    令牌不放 URL，避免进入反代访问日志。"""
+    await ws.accept()
+    try:
+        hello = json.loads(await asyncio.wait_for(ws.receive_text(), timeout=5))
+    except Exception:
+        await ws.close(code=4401); return
+    if not check_token(str(hello.get("auth", ""))):
+        await ws.close(code=4401); return
+
+    q = events.subscribe()
+    try:
+        missed = events.replay_since(int(hello.get("since") or 0))
+        await ws.send_json({"type": "resync"} if missed is None else {"type": "hello", "replay": missed})
+        while True:
+            try:
+                evt = await asyncio.wait_for(q.get(), timeout=25)
+            except asyncio.TimeoutError:
+                evt = {"type": "ping"}
+            await ws.send_json(evt)
+            if evt.get("type") == "resync":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        events.unsubscribe(q)

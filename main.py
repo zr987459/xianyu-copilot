@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()  # 必须早于 routes 导入：ADMIN_TOKEN / API_KEY 等在导入期读取
 import uvicorn
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -9,6 +11,12 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app", "st
 @app.get("/")
 async def read_index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+@app.get("/sw.js")
+async def service_worker():
+    # 根路径下发，作用域覆盖整站
+    return FileResponse(os.path.join(STATIC_DIR, "sw.js"), media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "9005"))

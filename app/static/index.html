@@ -34,6 +34,22 @@
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     /* iOS 底部安全区域支持 */
     .safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+    /* ===== 原生质感：毛玻璃 TabBar ===== */
+    .glass-bar { background: rgba(255,255,255,.72); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-top: .5px solid rgba(15,23,42,.08); padding-bottom: env(safe-area-inset-bottom); }
+    .nav-btn.active::before { content:''; position:absolute; top:4px; width:28px; height:3px; border-radius:2px; background:#2563EB; }
+    .nav-btn { position: relative; }
+    /* ===== 左滑操作 Swipe-to-Action ===== */
+    .swipe-row { position: relative; overflow: hidden; border-radius: .75rem; touch-action: pan-y; }
+    .swipe-actions { position:absolute; inset:0 0 0 auto; display:flex; }
+    .swipe-actions button { width:72px; color:#fff; font-size:12px; font-weight:600; }
+    .swipe-front { position:relative; z-index:1; transition: transform .25s cubic-bezier(.2,.8,.2,1); will-change: transform; }
+    .swipe-front.dragging { transition:none; }
+    /* ===== 宝贝浮动卡 & 思考链 ===== */
+    .item-float { position: sticky; top: 0; z-index: 5; backdrop-filter: blur(12px); background: rgba(255,255,255,.85); }
+    details.ai-trace > summary { list-style:none; cursor:pointer; }
+    details.ai-trace > summary::-webkit-details-marker { display:none; }
+    details.ai-trace[open] .chev { transform: rotate(90deg); }
+    @media (prefers-reduced-motion: reduce) { .swipe-front { transition:none; } }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden text-slate-800">
@@ -63,6 +79,7 @@
   </header>
 
   <!-- 主体可滚动内容区 -->
+  <div id="net-banner" class="hidden text-center text-[11px] py-1 bg-amber-50 text-amber-700 border-b border-amber-200">离线中，显示的是上次同步的数据</div>
   <main class="flex-1 overflow-y-auto no-scrollbar relative bg-slate-50" id="main-scroll">
     
     <!-- ==================== TAB 1: 消息 (Messages) ==================== -->
@@ -274,9 +291,9 @@
   </main>
 
   <!-- 底部固定 4 大导航 Tab (对齐 xianyu-mobile 4 大 Tab) -->
-  <nav class="bg-white border-t border-slate-200 fixed bottom-0 left-0 right-0 z-30 safe-bottom">
+  <nav class="glass-bar fixed bottom-0 left-0 right-0 z-30">
     <div class="flex justify-around items-center h-14">
-      <button onclick="switchTab('messages')" id="nav-messages" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-brand transition active:scale-90">
+      <button onclick="switchTab('messages')" id="nav-messages" class="nav-btn active flex flex-col items-center justify-center flex-1 h-full text-brand transition active:scale-90">
         <i data-lucide="message-circle" class="w-5 h-5 mb-0.5"></i>
         <span class="text-[10px] font-semibold">消息</span>
       </button>
@@ -310,23 +327,73 @@
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
-      <div class="flex-1 overflow-y-auto p-3 space-y-2.5 bg-slate-100/60 no-scrollbar" id="modal-chat-body"></div>
+      <div class="flex-1 overflow-y-auto bg-slate-100/60 no-scrollbar" id="modal-chat-scroll"><div id="modal-item-card"></div><div class="p-3 space-y-2.5" id="modal-chat-body"></div></div>
     </div>
   </div>
 
   <script>
+    // ===== 安全基建：HTML 转义 + 鉴权 fetch =====
+    const esc = v => String(v ?? '').replace(/[&<>"'`]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[ch]));
+    const _rawFetch = window.fetch.bind(window);
+    window.fetch = (url, opts = {}) => {
+      if (typeof url === 'string' && url.startsWith('/api/')) {
+        const token = localStorage.getItem('xc_token') || '';
+        opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${token}` };
+        return _rawFetch(url, opts).then(r => {
+          if (r.status === 401) {
+            const t = prompt('请输入管理令牌 ADMIN_TOKEN');
+            if (t) { localStorage.setItem('xc_token', t.trim()); location.reload(); }
+          }
+          return r;
+        });
+      }
+      return _rawFetch(url, opts);
+    };
+
+    // ===== 左滑手势：Pointer Events 统一触屏/鼠标；横向位移 > 纵向才接管，避免与列表滚动冲突 =====
+    function swipeRow(front, actionsHtml, width) {
+      return `<div class="swipe-row"><div class="swipe-actions">${actionsHtml}</div><div class="swipe-front" data-w="${width}">${front}</div></div>`;
+    }
+    (function bindSwipe() {
+      let el = null, x0 = 0, y0 = 0, base = 0, locked = null, opened = null;
+      document.addEventListener('pointerdown', e => {
+        const f = e.target.closest('.swipe-front'); if (!f) { opened && close(opened); return; }
+        if (opened && opened !== f) close(opened);
+        el = f; x0 = e.clientX; y0 = e.clientY; locked = null;
+        base = Number(f.dataset.x || 0);
+      });
+      document.addEventListener('pointermove', e => {
+        if (!el) return;
+        const dx = e.clientX - x0, dy = e.clientY - y0;
+        if (locked === null && Math.hypot(dx, dy) > 8) locked = Math.abs(dx) > Math.abs(dy);
+        if (!locked) return;
+        const w = Number(el.dataset.w); const x = Math.max(-w - 24, Math.min(0, base + dx));
+        el.classList.add('dragging'); el.style.transform = `translateX(${x}px)`; el.dataset.x = x;
+      });
+      document.addEventListener('pointerup', () => {
+        if (!el) return; el.classList.remove('dragging');
+        const w = Number(el.dataset.w), x = Number(el.dataset.x || 0);
+        if (locked && x < -w / 2) { el.style.transform = `translateX(${-w}px)`; el.dataset.x = -w; opened = el; navigator.vibrate?.(8); }
+        else close(el);
+        if (locked) { const stop = ev => { ev.stopPropagation(); ev.preventDefault(); }; el.addEventListener('click', stop, { capture: true, once: true }); }
+        el = null;
+      });
+      function close(f) { f.style.transform = 'translateX(0)'; f.dataset.x = 0; if (opened === f) opened = null; }
+    })();
+
     // Tab 切换逻辑
     function switchTab(name) {
       document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
       document.getElementById('tab-' + name).classList.remove('hidden');
 
       document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.classList.remove('text-brand', 'font-semibold');
+        btn.classList.remove('text-brand', 'font-semibold', 'active');
         btn.classList.add('text-slate-400', 'font-medium');
       });
       const activeBtn = document.getElementById('nav-' + name);
       activeBtn.classList.remove('text-slate-400', 'font-medium');
-      activeBtn.classList.add('text-brand', 'font-semibold');
+      activeBtn.classList.add('text-brand', 'font-semibold', 'active');
+      navigator.vibrate?.(5);  // 轻触反馈（Android）
 
       if (name === 'messages') loadChats();
       if (name === 'orders') loadOrders();
@@ -377,7 +444,10 @@
         const res = await fetch('/api/chats').then(r => r.json());
         allChats = res.chats || [];
         renderChatList(allChats);
+        localStorage.setItem('xc_cache_chats', JSON.stringify(allChats));  // 离线兜底（不含卡密）
       } catch (e) {
+        const cached = JSON.parse(localStorage.getItem('xc_cache_chats') || 'null');
+        if (cached) { allChats = cached; renderChatList(cached); return; }
         box.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">拉取会话失败</div>';
       }
     }
@@ -391,17 +461,17 @@
       let html = '';
       list.forEach(c => {
         html += `
-          <div onclick="openChatModal('${c.user_id}', '${c.item_id}')" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
+          <div data-uid="${esc(c.user_id)}" data-iid="${esc(c.item_id)}" onclick="openChatModal(this.dataset.uid, this.dataset.iid)" class="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between active:bg-slate-50 transition cursor-pointer">
             <div class="flex items-center space-x-3 min-w-0">
               <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs shrink-0">
-                ${c.user_id.slice(-2)}
+                ${esc(c.user_id.slice(-2))}
               </div>
               <div class="min-w-0">
                 <div class="flex items-center space-x-1.5">
-                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${c.user_id.slice(-6)}</span>
+                  <span class="font-bold text-xs text-slate-900 truncate">买家 ${esc(c.user_id.slice(-6))}</span>
                   ${c.bargain_count > 0 ? `<span class="bg-rose-50 text-rose-600 text-[10px] px-1.5 py-0.5 rounded font-medium">砍价 ${c.bargain_count} 轮</span>` : ''}
                 </div>
-                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${c.last_content}</p>
+                <p class="text-[11px] text-slate-400 truncate mt-0.5">${c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: '}${esc(c.last_content)}</p>
               </div>
             </div>
             <div class="text-right shrink-0">
@@ -426,6 +496,28 @@
       renderChatList(filtered);
     }
 
+    // AI 决策依据（卖家可见，默认折叠）：展示结构化摘要而非模型原始思考
+    function renderTrace(t) {
+      const chips = [
+        t.intent && `意图 · ${t.intent}`,
+        t.round != null && `第 ${t.round} 轮`,
+        t.offer != null && `买家出价 ¥${t.offer}`,
+        t.floor_hit != null && (t.floor_hit ? '触及底价' : '高于底价'),
+      ].filter(Boolean);
+      return `
+        <details class="ai-trace max-w-[75%] mt-1 text-[11px] text-slate-500">
+          <summary class="flex items-center space-x-1 select-none">
+            <span class="chev inline-block transition">›</span><span>AI 决策依据</span>
+            ${t.latency_ms ? `<span class="text-slate-300">· ${esc(t.latency_ms)}ms</span>` : ''}
+          </summary>
+          <div class="mt-1 p-2 bg-white/80 border border-slate-200 rounded-lg space-y-1">
+            <div class="flex flex-wrap gap-1">${chips.map(c => `<span class="px-1.5 py-0.5 bg-slate-100 rounded">${esc(c)}</span>`).join('')}</div>
+            ${(t.steps || []).map((st, i) => `<p>${i + 1}. ${esc(st)}</p>`).join('')}
+            ${t.decision ? `<p class="font-semibold text-slate-700">结论：${esc(t.decision)}</p>` : ''}
+          </div>
+        </details>`;
+    }
+
     // 聊天详情 Modal
     async function openChatModal(userId, itemId) {
       document.getElementById('modal-buyer-title').innerText = '买家 ' + userId.slice(-6);
@@ -434,20 +526,31 @@
       body.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">加载聊天记录...</div>';
       document.getElementById('chat-modal').classList.remove('hidden');
 
-      const res = await fetch(`/api/chat/messages?user_id=${userId}&item_id=${itemId}`).then(r => r.json());
+      const res = await fetch(`/api/chat/messages?user_id=${encodeURIComponent(userId)}&item_id=${encodeURIComponent(itemId)}`).then(r => r.json());
       let html = '';
+      const it = res.item;
+      document.getElementById('modal-item-card').innerHTML = it ? `
+        <div class="item-float mx-3 mt-2 p-2 rounded-xl border border-slate-200 shadow-sm flex items-center space-x-2">
+          ${it.image ? `<img src="${esc(it.image)}" class="w-11 h-11 rounded-lg object-cover bg-slate-100" loading="lazy">` : '<div class="w-11 h-11 rounded-lg bg-slate-100"></div>'}
+          <div class="min-w-0 flex-1">
+            <p class="text-xs font-semibold text-slate-800 truncate">${esc(it.title)}</p>
+            <p class="text-[11px] text-rose-600 font-bold">¥${esc(it.price)}</p>
+          </div>
+          ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" class="text-[11px] text-brand px-2 py-1 bg-brand-light rounded-full">查看</a>` : ''}
+        </div>` : '';
       (res.messages || []).forEach(m => {
         const isMe = m.role === 'assistant';
+        let meta = null; try { meta = m.meta ? JSON.parse(m.meta) : null; } catch (_) {}
         html += `
-          <div class="flex ${isMe ? 'justify-end' : 'justify-start'}">
+          <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'}">
             <div class="max-w-[75%] px-3 py-2 rounded-2xl text-xs leading-relaxed ${isMe ? 'bg-brand text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none'} shadow-xs">
-              ${m.content}
+              ${esc(m.content)}
             </div>
-          </div>
-        `;
+            ${isMe && meta ? renderTrace(meta) : ''}
+          </div>`;
       });
       body.innerHTML = html;
-      body.scrollTop = body.scrollHeight;
+      const sc = document.getElementById('modal-chat-scroll'); sc.scrollTop = sc.scrollHeight;
       lucide.createIcons();
     }
 
@@ -465,20 +568,26 @@
         return;
       }
       let html = '';
+      const STATUS = { pending: ['待发送', 'amber'], sent: ['已发消息', 'blue'], confirmed: ['已确认发货', 'emerald'],
+                       confirm_failed: ['确认失败', 'rose'], out_of_stock: ['卡密缺货', 'rose'] };
       logs.forEach(l => {
-        html += `
-          <div class="bg-white p-3 rounded-xl border border-slate-200 space-y-1.5">
+        const [label, color] = STATUS[l.confirm_status] || [l.confirm_status || '已发货', 'emerald'];
+        const front = `
+          <div class="bg-white p-3 border border-slate-200 rounded-xl space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-bold text-slate-800">单号: ${l.order_id || '自动发货'}</span>
-              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold">${l.confirm_status || '已发货'}</span>
+              <span class="font-bold text-slate-800">单号: ${esc(l.order_id || '-')}</span>
+              <span class="text-[10px] text-${color}-600 bg-${color}-50 px-2 py-0.5 rounded font-semibold">${esc(label)}</span>
             </div>
-            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${l.delivery_content}</p>
+            <p class="text-[11px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all">${esc(l.delivery_content)}</p>
             <div class="flex items-center justify-between text-[10px] text-slate-400">
-              <span>买家: ${l.user_id ? l.user_id.slice(-6) : '-'}</span>
-              <span>${l.created_at ? l.created_at.slice(5, 16) : ''}</span>
+              <span>买家: ${esc(l.user_id ? l.user_id.slice(-6) : '-')}</span>
+              <span>${esc(l.created_at ? l.created_at.slice(5, 16) : '')}</span>
             </div>
-          </div>
-        `;
+          </div>`;
+        const acts = `
+          <button class="bg-slate-500" onclick="navigator.clipboard.writeText(${esc(JSON.stringify(l.order_id || ''))})">复制单号</button>
+          <button class="bg-brand" onclick="retryDelivery(${esc(JSON.stringify(l.order_id || ''))})">重新确认</button>`;
+        html += swipeRow(front, acts, 144);
       });
       box.innerHTML = html;
     }
@@ -563,12 +672,12 @@
           <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between text-xs">
             <div class="min-w-0 pr-2">
               <div class="flex items-center space-x-1.5">
-                <span class="font-bold text-slate-900 truncate">[${c.keyword}]</span>
+                <span class="font-bold text-slate-900 truncate">[${esc(c.keyword)}]</span>
                 <span class="${isUsed ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold">
                   ${isUsed ? '🔴 已发' : '🟢 在库就绪'}
                 </span>
               </div>
-              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${c.card_content}</p>
+              <p class="font-mono text-slate-600 text-[11px] truncate mt-0.5">${esc(c.card_content)}</p>
             </div>
             <div class="shrink-0 text-right">
               <button onclick="delCardItem(${c.id})" class="text-rose-500 text-[10px] hover:underline">删除</button>
@@ -617,14 +726,14 @@
         html += `
           <div class="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
             <div class="flex items-center justify-between font-bold">
-              <span class="text-slate-900">${r.keyword}</span>
+              <span class="text-slate-900">${esc(r.keyword)}</span>
               <button onclick="delRuleItem(${r.id})" class="text-rose-500 text-[11px]">删除</button>
             </div>
             <div class="flex items-center space-x-1.5">
               ${r.use_card_pool ? `<span class="bg-blue-50 text-brand px-1.5 py-0.5 rounded text-[10px] font-semibold">🎫 卡密池 (剩余 ${r.card_stock})</span>` : ''}
               ${r.delivery_content ? `<span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]">🔗 固定说明/网盘</span>` : ''}
             </div>
-            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${r.delivery_content}</p>` : ''}
+            ${r.delivery_content ? `<p class="text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded">${esc(r.delivery_content)}</p>` : ''}
           </div>
         `;
       });
@@ -708,10 +817,10 @@
       items.forEach(it => {
         html += `
           <div class="p-2 bg-slate-50 rounded-lg flex items-center justify-between">
-            <span class="font-bold truncate max-w-[200px]">${it.title}</span>
+            <span class="font-bold truncate max-w-[200px]">${esc(it.title)}</span>
             <div class="flex items-center space-x-2">
-              <span class="font-bold text-brand">¥${it.price}</span>
-              ${it.url ? `<a href="${it.url}" target="_blank" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
+              <span class="font-bold text-brand">¥${esc(it.price)}</span>
+              ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" class="text-blue-500 underline text-[11px]">查看</a>` : ''}
             </div>
           </div>
         `;
@@ -749,11 +858,65 @@
       alert('✅ 提示词已保存生效！');
     }
 
+    // ===== 实时通道：指数退避 + 抖动 + 心跳看门狗 + seq 补洞 + 前台恢复 =====
+    const Realtime = {
+      ws: null, retry: 0, timer: null, watchdog: null,
+      seq: Number(sessionStorage.getItem('xc_seq') || 0),
+      connect() {
+        if (this.ws && this.ws.readyState <= 1) return;
+        if (!navigator.onLine) return;
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = this.ws = new WebSocket(`${proto}://${location.host}/ws/events`);
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ auth: localStorage.getItem('xc_token') || '', since: this.seq }));
+          this.retry = 0; this.kick(); setNetState(true);
+        };
+        ws.onmessage = ev => {
+          this.kick();
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'ping') return;
+          if (msg.type === 'resync') return refreshCurrentTab();     // 缺口过大，全量刷新
+          (msg.type === 'hello' ? msg.replay : [msg]).forEach(e => this.apply(e));
+        };
+        ws.onclose = ev => {
+          clearTimeout(this.watchdog);
+          if (ev.code === 4401) return;                              // 令牌错误不重连
+          setNetState(navigator.onLine && this.retry < 3);
+          const delay = Math.min(30000, 1000 * 2 ** this.retry++) * (0.5 + Math.random() / 2);
+          clearTimeout(this.timer); this.timer = setTimeout(() => this.connect(), delay);
+        };
+        ws.onerror = () => ws.close();
+      },
+      kick() {  // 60s 内无任何帧（服务端 25s ping）视为半开连接，主动断开重连
+        clearTimeout(this.watchdog);
+        this.watchdog = setTimeout(() => this.ws && this.ws.close(), 60000);
+      },
+      apply(e) {
+        if (e.seq) { this.seq = e.seq; sessionStorage.setItem('xc_seq', e.seq); }
+        const tab = document.querySelector('.tab-pane:not(.hidden)')?.id;
+        if (e.type === 'message' && tab === 'tab-messages') loadChats();
+        if (e.type === 'delivery' && tab === 'tab-orders') loadOrders();
+        if (e.type === 'stats') loadStats();
+      },
+      resume() { this.retry = 0; clearTimeout(this.timer); this.connect(); }
+    };
+    function setNetState(ok) { document.getElementById('net-banner').classList.toggle('hidden', ok); }
+    window.addEventListener('online', () => Realtime.resume());
+    window.addEventListener('offline', () => setNetState(false));
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) Realtime.resume(); });
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+    async function retryDelivery(orderId) {
+      const r = await fetch(`/api/orders/${encodeURIComponent(orderId)}/retry-confirm`, { method: 'POST' }).then(r => r.json());
+      alert(r.success ? '✅ 已重新确认发货' : `❌ ${r.detail || r.message || '失败'}`); loadOrders();
+    }
+
     // 页面初始化
     loadStats();
     loadChats();
     lucide.createIcons();
-    setInterval(loadStats, 10000);
+    Realtime.connect();
+    setInterval(() => { if (!Realtime.ws || Realtime.ws.readyState !== 1) loadStats(); }, 30000);  // WS 不可用时降级轮询
   </script>
 </body>
 </html>
