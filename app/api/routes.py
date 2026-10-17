@@ -10,16 +10,21 @@ import base64
 from app.db.database import get_db, init_db
 from app.services.publisher_service import XianyuPublisherService
 from app.services.XianyuApis import XianyuApis
+from app.core.security import AdminAuthMiddleware, ALLOWED_PROMPTS
 
 app = FastAPI(title="Xianyu Copilot API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 管理面板与 API 同源，不需要跨域；如需从其他源访问，在 .env 里配置 CORS_ORIGINS（逗号分隔）
+_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+app.add_middleware(AdminAuthMiddleware)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
@@ -292,6 +297,9 @@ def get_prompts():
 
 @app.post("/api/prompts")
 def save_prompts(data: dict):
+    bad = [k for k in data if k not in ALLOWED_PROMPTS or not isinstance(data[k], str)]
+    if bad:
+        return JSONResponse({"success": False, "detail": f"非法 prompt 名称: {bad}"}, status_code=400)
     for name, content in data.items():
         path = os.path.join(PROMPTS_DIR, f"{name}.txt")
         with open(path, "w", encoding="utf-8") as fp:

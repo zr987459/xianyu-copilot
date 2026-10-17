@@ -1,0 +1,136 @@
+/* ============================================================
+ * Xianyu Copilot · 原生质感层（与 Tailwind 共存，不依赖构建）
+ * 1 毛玻璃 TabBar  2 左滑操作  3 宝贝浮动卡  4 AI 思考链折叠
+ * 5 视口 / 滚动 / 底部弹层等「像 App」的基础修正
+ * ============================================================ */
+
+:root {
+  --brand: #2563eb;
+  --ink: #0f172a;
+  --muted: #94a3b8;
+  --hairline: rgba(15, 23, 42, .08);
+  --glass: rgba(255, 255, 255, .72);
+  --tabbar-h: 56px;
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+  --spring: cubic-bezier(.32, .72, 0, 1);      /* iOS 弹层曲线 */
+}
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #f1f5f9; --hairline: rgba(255,255,255,.08); --glass: rgba(17,24,39,.72); }
+}
+
+/* ---------- 5. 基础：真实视口高度、禁回弹穿透、去点击高亮 ---------- */
+html, body { height: 100%; }
+body.app {
+  height: 100dvh;                    /* iOS 地址栏伸缩时 h-screen 会被裁 */
+  overscroll-behavior-y: none;       /* 禁止整页橡皮筋，滚动只发生在内容区 */
+  -webkit-font-smoothing: antialiased;
+  padding-top: var(--safe-t);
+}
+.app-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;      /* 列表滚到底不带动外层 */
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(var(--tabbar-h) + var(--safe-b) + 12px);
+}
+.pressable { transition: transform .12s var(--spring), background-color .12s; }
+.pressable:active { transform: scale(.97); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ---------- 1. 毛玻璃底部 TabBar ---------- */
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  height: calc(var(--tabbar-h) + var(--safe-b));
+  padding-bottom: var(--safe-b);
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: var(--glass);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-top: .5px solid var(--hairline);          /* 0.5px 发丝线，Retina 下才像原生 */
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .tabbar { background: rgba(255,255,255,.96); }   /* 老 Android WebView 兜底 */
+}
+.tabbar__item {
+  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; color: var(--muted); font-size: 10px; font-weight: 500;
+  -webkit-tap-highlight-color: transparent; background: none; border: 0;
+}
+.tabbar__item svg { width: 22px; height: 22px; transition: transform .25s var(--spring); }
+.tabbar__item[aria-selected="true"] { color: var(--brand); font-weight: 600; }
+.tabbar__item[aria-selected="true"] svg { transform: translateY(-1px) scale(1.06); }
+.tabbar__badge {
+  position: absolute; top: 6px; left: calc(50% + 6px);
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: #ef4444; color: #fff; font-size: 10px; line-height: 16px; text-align: center;
+  box-shadow: 0 0 0 2px var(--glass);
+}
+.tabbar__badge:empty, .tabbar__badge[data-n="0"] { display: none; }
+
+/* 页面切换：轻微淡入上浮，替代 hidden 硬切 */
+.tab-pane { animation: pane-in .22s var(--spring); }
+@keyframes pane-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- 2. 左滑操作 Swipe-to-Action ---------- */
+.swipe { position: relative; overflow: hidden; border-radius: 12px; touch-action: pan-y; }
+.swipe__actions {
+  position: absolute; inset: 0 0 0 auto; display: flex;
+}
+.swipe__btn {
+  width: 72px; border: 0; color: #fff; font-size: 12px; font-weight: 600;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+}
+.swipe__btn--read   { background: #3b82f6; }
+.swipe__btn--ship   { background: #10b981; }
+.swipe__btn--copy   { background: #64748b; }
+.swipe__btn--danger { background: #ef4444; }
+.swipe__content {
+  position: relative; z-index: 1; background: #fff;
+  transform: translate3d(var(--dx, 0px), 0, 0);
+  will-change: transform;
+}
+.swipe.is-animating .swipe__content { transition: transform .3s var(--spring); }
+
+/* ---------- 3. 对话页宝贝浮动卡 ---------- */
+.item-float {
+  position: sticky; top: 0; z-index: 5;
+  margin: 0 -12px 8px; padding: 8px 12px;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--glass);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  backdrop-filter: saturate(180%) blur(16px);
+  border-bottom: .5px solid var(--hairline);
+  transition: padding .2s var(--spring);
+}
+.item-float__img { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; background: #e2e8f0; flex: none; transition: width .2s, height .2s; }
+.item-float__title { font-size: 12px; font-weight: 600; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.item-float__price { font-size: 13px; font-weight: 700; color: #ef4444; }
+.item-float__price small { font-size: 10px; font-weight: 500; color: var(--muted); text-decoration: line-through; margin-left: 4px; }
+.item-float__chip { font-size: 10px; padding: 1px 6px; border-radius: 6px; background: #eff6ff; color: var(--brand); }
+.item-float__cta { margin-left: auto; flex: none; font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px; background: var(--brand); color: #fff; border: 0; }
+.item-float.is-compact { padding-top: 4px; padding-bottom: 4px; }
+.item-float.is-compact .item-float__img { width: 28px; height: 28px; }
+
+/* ---------- 4. AI 思考链折叠 ---------- */
+.think { margin: 0 0 4px; max-width: 75%; align-self: flex-end; }
+.think summary {
+  list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--muted); padding: 2px 8px; border-radius: 999px; background: rgba(148,163,184,.12);
+}
+.think summary::-webkit-details-marker { display: none; }
+.think summary::after { content: ""; width: 6px; height: 6px; border-right: 1.5px solid; border-bottom: 1.5px solid; transform: rotate(-45deg); transition: transform .2s; margin-left: 2px; }
+.think[open] summary::after { transform: rotate(45deg); }
+.think__body {
+  margin-top: 6px; padding: 8px 10px; border-left: 2px solid #cbd5e1;
+  font-size: 11px; line-height: 1.6; color: #64748b; white-space: pre-wrap; word-break: break-word;
+  max-height: 40vh; overflow-y: auto;
+}
+.think.is-streaming summary { color: var(--brand); }
+.think.is-streaming summary::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: think-pulse 1s infinite; }
+@keyframes think-pulse { 50% { opacity: .25; } }
+
+/* ---------- 底部弹层：拖拽关闭 ---------- */
+.sheet { transform: translate3d(0, var(--sy, 0px), 0); transition: transform .32s var(--spring); }
+.sheet.is-dragging { transition: none; }
+.sheet__grabber { width: 36px; height: 5px; border-radius: 3px; background: #cbd5e1; margin: 6px auto 2px; }
+.sheet-backdrop { transition: opacity .32s var(--spring); }
