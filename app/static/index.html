@@ -649,12 +649,14 @@
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ keyword: kw, sku: document.getElementById('card-input-sku').value.trim(), card_content: content })
-      }).then(r => r.json());
-      if (res.success) {
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) { alert('⚠️ 该卡密已在库中，未重复入库（同一商品下一卡只能卖一次）'); return; }
+      if (data.success) {
         document.getElementById('card-input-single').value = '';
         loadCardsStock();
         loadStats();
-        alert('🎉 单个卡密已成功录入！');
+        alert('🎉 单个卡密已成功录入！' + (data.waiting_orders ? `\n有 ${data.waiting_orders} 单在等这个套餐补货，将自动补发。` : ''));
       }
     }
 
@@ -671,7 +673,10 @@
         document.getElementById('card-input-batch').value = '';
         loadCardsStock();
         loadStats();
-        alert(`🎉 成功导入 ${res.count} 条卡密入库！`);
+        let tip = `🎉 成功导入 ${res.count} 条卡密入库！`;
+        if (res.duplicates) tip += `\n已跳过 ${res.duplicates} 条库中已存在的重复卡密。`;
+        if (res.waiting_orders) tip += `\n有 ${res.waiting_orders} 单在等这个套餐补货，将自动补发。`;
+        alert(tip);
       }
     }
 

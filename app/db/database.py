@@ -144,3 +144,21 @@ def _migrate_sku_and_quantity(c):
     );
     ''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_delivery_orders_status ON delivery_orders(status, updated_at)")
+
+    # 发货可靠性（v2）：
+    # - sent_count：已"实际发到买家"的卡密件数（≠ 已绑定件数）。绑卡后发消息失败，重跑时按它补发，不会丢卡
+    # - fixed_sent：固定说明是否已发过，补发时不再重复
+    # - lease_until：订单处理租约（unix 秒）。WSS 重推 / 多 worker 同时处理同一订单时只有一个能进入
+    # - confirm_status：确认发货结果；失败会进入 confirm_failed 并可重试
+    oc = _columns(c, "delivery_orders")
+    if "sent_count" not in oc:
+        c.execute("ALTER TABLE delivery_orders ADD COLUMN sent_count INTEGER NOT NULL DEFAULT 0")
+        c.execute("UPDATE delivery_orders SET sent_count=delivered_count")
+    if "fixed_sent" not in oc:
+        c.execute("ALTER TABLE delivery_orders ADD COLUMN fixed_sent INTEGER NOT NULL DEFAULT 0")
+        c.execute("UPDATE delivery_orders SET fixed_sent=1 WHERE status IN ('partial','pending_stock','delivered')")
+    if "lease_until" not in oc:
+        c.execute("ALTER TABLE delivery_orders ADD COLUMN lease_until REAL")
+    if "confirm_status" not in oc:
+        c.execute("ALTER TABLE delivery_orders ADD COLUMN confirm_status TEXT NOT NULL DEFAULT ''")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_card_content ON card_keys(keyword, card_content)")

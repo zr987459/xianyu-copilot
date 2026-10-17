@@ -1,5 +1,6 @@
 import re
 import sqlite3
+import time
 from typing import Any, Optional, Tuple
 
 from loguru import logger
@@ -8,6 +9,8 @@ from app.db.cards import MAX_QUANTITY, StockLockError, claim_cards, format_cards
 from app.services.delivery_service import XianyuDeliveryService
 
 GENERIC_KEYWORDS = {"*", "默认", "通用"}
+LEASE_SECONDS = 90  # 单次处理（发消息 + 确认发货）的最长占用时间；进程崩溃后过期自动释放
+RETRYABLE = ("processing", "partial", "pending_stock", "confirm_failed")
 
 # 订单事件里可能承载规格/数量的字段名（闲鱼不同推送版本命名不一，需用真实 WSS 报文校准）
 SKU_KEYS = ("skuDesc", "sku_desc", "skuInfo", "skuText", "specDesc", "spec_desc", "skuName", "propertiesName")
@@ -130,12 +133,55 @@ class AutoDeliveryManager:
         finally:
             conn.close()
 
-    def pending_orders(self):
-        """缺货待补发的订单（补货后由监听进程逐个调用 handle_paid_order 重跑即可，幂等）"""
+    def pending_orders(self, keyword: Optional[str] = None, sku: Optional[str] = None):
+        """需要重跑的订单：缺货待补发、确认发货失败、处理中途中断（租约已过期）。
+
+        补货后由监听进程逐个调用 handle_paid_order 重跑即可（幂等，只补未送达的件）。
+        """
+        q = ("SELECT * FROM delivery_orders WHERE status IN ('partial','pending_stock','confirm_failed','processing')"
+             " AND (lease_until IS NULL OR lease_until < ?)")
+        args = [time.time()]
+        if keyword is not None:
+            q += " AND keyword=?"; args.append(keyword)
+        if sku is not None:
+            q += " AND sku=?"; args.append(sku)
         conn = self._conn()
         try:
-            return [dict(r) for r in conn.execute(
-                "SELECT * FROM delivery_orders WHERE status IN ('partial','pending_stock') ORDER BY created_at")]
+            return [dict(r) for r in conn.execute(q + " ORDER BY created_at", args)]
+        finally:
+            conn.close()
+
+    def acquire_lease(self, order_id: str, **init_fields) -> bool:
+        """原子占用订单：首单插入并占用；已存在则仅当未完结且租约空闲时占用。拿不到返回 False。"""
+        now = time.time()
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status, lease_until FROM delivery_orders WHERE order_id=?",
+                               (order_id,)).fetchone()
+            if row is None:
+                cols = ["order_id", "status", "lease_until"] + list(init_fields)
+                vals = [order_id, "processing", now + LEASE_SECONDS] + list(init_fields.values())
+                conn.execute(f"INSERT INTO delivery_orders ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                             vals)
+                conn.execute("COMMIT"); return True
+            if row["status"] not in RETRYABLE or (row["lease_until"] or 0) > now:
+                conn.execute("COMMIT"); return False
+            conn.execute("UPDATE delivery_orders SET lease_until=?, updated_at=CURRENT_TIMESTAMP WHERE order_id=?",
+                         (now + LEASE_SECONDS, order_id))
+            conn.execute("COMMIT"); return True
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+    def release_lease(self, order_id: str):
+        conn = self._conn()
+        try:
+            conn.execute("UPDATE delivery_orders SET lease_until=NULL WHERE order_id=?", (order_id,))
+            conn.commit()
         finally:
             conn.close()
 
@@ -154,9 +200,12 @@ class AutoDeliveryManager:
     # ---------- 主流程 ----------
     async def handle_paid_order(self, ws, send_msg_func, user_id, chat_id, order_id,
                                 item_title="", sku_desc="", quantity=1, order_payload=None):
-        """“等待卖家发货”时触发；补货后对 pending_orders() 再调一次即可补发余量。
+        """“等待卖家发货”时触发；补货、发送失败、确认失败后再调一次即可（幂等）。
 
-        sku_desc / quantity 可直接传入，也可传原始 order_payload 由 parse_order_meta 解析。
+        可靠性约定：
+        - 同一订单同一时刻只有一个调用能进入（租约），WSS 重推 / 多 worker 不会重复发消息或重复确认；
+        - 卡密“已绑定”和“已送达”分开记：绑卡后发消息失败，重跑会把已绑定未送达的卡再发一次，绝不丢卡；
+        - 只有全部件数送达后才确认发货；确认失败进入 confirm_failed，重跑只重试确认，不再打扰买家。
         """
         if not order_id:
             logger.error("⚠️ 付款事件缺少订单号，转人工处理（无单号无法保证一单一卡）")
@@ -164,7 +213,7 @@ class AutoDeliveryManager:
         tail = order_id[-4:]
 
         prev = self.get_order(order_id)
-        if prev and prev["status"] in ("delivered", "manual"):
+        if prev and prev["status"] not in RETRYABLE:
             logger.info(f"订单 ***{tail} 状态为 {prev['status']}，忽略重复事件")
             return prev["status"] == "delivered"
 
@@ -172,10 +221,12 @@ class AutoDeliveryManager:
             p_sku, p_qty = parse_order_meta(order_payload)
             sku_desc = sku_desc or p_sku
             quantity = quantity if quantity and quantity > 1 else p_qty
-        if prev:  # 补发时沿用首单记录，防止重推事件里数量/规格丢失
+        if prev:  # 重跑时沿用首单记录，防止重推事件里数量/规格丢失
             sku_desc = sku_desc or prev["sku_desc"]
             quantity = max(int(quantity or 1), int(prev["quantity"] or 1))
             item_title = item_title or prev["item_title"] or ""
+            user_id = user_id or prev["user_id"]
+            chat_id = chat_id or prev["chat_id"]
         try:
             quantity = int(quantity or 1)
         except (TypeError, ValueError):
@@ -187,21 +238,34 @@ class AutoDeliveryManager:
             return False
         keyword = rule["keyword"]
 
-        if quantity < 1 or quantity > MAX_QUANTITY:
+        if not self.acquire_lease(order_id, rule_id=rule["id"], keyword=keyword, sku_desc=sku_desc,
+                                  quantity=quantity, user_id=user_id, chat_id=chat_id, item_title=item_title):
+            logger.info(f"订单 ***{tail} 正由其他任务处理或已完结，跳过本次事件")
+            return False
+        try:
+            return await self._process_leased(send_msg_func, ws, user_id, chat_id, order_id, tail,
+                                               rule, keyword, item_title, sku_desc, quantity)
+        finally:
+            self.release_lease(order_id)
+
+    async def _process_leased(self, send_msg_func, ws, user_id, chat_id, order_id, tail,
+                              rule, keyword, item_title, sku_desc, quantity):
+        order = self.get_order(order_id)
+
+        def _manual(reason):
             self.upsert_order(order_id, rule_id=rule["id"], keyword=keyword, sku_desc=sku_desc,
                               quantity=quantity, status="manual", user_id=user_id, chat_id=chat_id,
                               item_title=item_title)
-            logger.error(f"订单 ***{tail} 件数 {quantity} 超出自动发货上限 {MAX_QUANTITY}，转人工")
+            logger.warning(f"订单 ***{tail} {reason}，转人工")
             return False
+
+        if quantity < 1 or quantity > MAX_QUANTITY:
+            return _manual(f"件数 {quantity} 超出自动发货上限 {MAX_QUANTITY}")
 
         sku_row, sku_state = self.match_sku(rule, sku_desc)
         if sku_state == "unmatched":
             # 有套餐细分却对不上：宁可转人工，也不能把月卡发成年卡
-            self.upsert_order(order_id, rule_id=rule["id"], keyword=keyword, sku_desc=sku_desc,
-                              quantity=quantity, status="manual", user_id=user_id, chat_id=chat_id,
-                              item_title=item_title)
-            logger.warning(f"订单 ***{tail} 规格「{sku_desc}」未匹配规则 [{keyword}] 的任何套餐，转人工")
-            return False
+            return _manual(f"规格「{sku_desc}」未匹配规则 [{keyword}] 的任何套餐")
 
         if sku_row:
             sku = sku_row["sku_name"]
@@ -212,17 +276,21 @@ class AutoDeliveryManager:
             fixed_content = (rule.get("delivery_content") or "").strip()
             use_card_pool = bool(rule.get("use_card_pool", 0))
         allow_partial = (rule.get("shortage_policy") or "partial") != "hold"
-        is_resend = prev is not None and prev["status"] in ("partial", "pending_stock")
 
+        # 套餐一旦确定就锁死：重跑时规格文本若变了也不换池
+        if order.get("sku") and order["sku"] != sku:
+            return _manual(f"套餐由「{order['sku']}」变为「{sku}」")
+        sent_count = int(order.get("sent_count") or 0)
+        fixed_sent = bool(order.get("fixed_sent"))
+        already_told = fixed_sent or sent_count > 0
         self.upsert_order(order_id, rule_id=rule["id"], keyword=keyword, sku=sku, sku_desc=sku_desc,
-                          quantity=quantity, user_id=user_id, chat_id=chat_id, item_title=item_title,
-                          status=prev["status"] if prev else "processing")
+                          quantity=quantity, user_id=user_id, chat_id=chat_id, item_title=item_title)
 
         parts = []
-        if fixed_content and not is_resend:
+        if fixed_content and not fixed_sent:
             parts.append(f"【下载与使用说明{(' · ' + sku) if sku else ''}】：\n{fixed_content}")
 
-        complete, delivered = True, quantity
+        to_send, bound = [], quantity
         if use_card_pool:
             try:
                 res = claim_cards(self.db_path, keyword, order_id, quantity=quantity,
@@ -230,43 +298,67 @@ class AutoDeliveryManager:
             except StockLockError:
                 logger.warning(f"卡密库繁忙，订单 ***{tail} 稍后重试（未通知买家）")
                 return False
-            complete, delivered = res.complete, res.delivered
-            to_send = res.newly_claimed
+            bound = res.delivered
+            # 发“已绑定但还没送达”的那部分（含上次发消息失败的件），而不只是本次新绑定的
+            to_send = [c for c in res.cards if int(c["order_seq"] or 0) > sent_count]
             if to_send:
-                note = f"（补发第 {to_send[0]['order_seq']}-{to_send[-1]['order_seq']} 件）" if is_resend else ""
+                note = (f"（补发第 {to_send[0]['order_seq']}-{to_send[-1]['order_seq']} 件）"
+                        if sent_count > 0 else "")
                 parts.append(format_cards_message(to_send, quantity, sku, note))
-            if not complete:
-                if res.delivered:
-                    parts.append(f"⚠️ 本单共 {quantity} 件，已发 {res.delivered} 件，剩余 {res.shortage} 件正在补货，"
+            if bound < quantity and (to_send or not already_told):
+                if bound:
+                    parts.append(f"⚠️ 本单共 {quantity} 件，已发 {bound} 件，剩余 {quantity - bound} 件正在补货，"
                                  f"到货后会自动补发到这里，无需重新下单。")
                 else:
                     parts.append(f"⚠️ 本单共 {quantity} 件，当前库存正在补货，到货后会一次性自动发齐，无需重新下单。")
-            logger.info(f"🎫 订单 ***{tail} [{keyword}/{sku or '通用'}] 本次绑定 {len(to_send)} 张，"
-                        f"累计 {res.delivered}/{quantity}")
-            if is_resend and not to_send:
-                logger.info(f"订单 ***{tail} 仍缺货，暂不打扰买家")
-                return False
+            logger.info(f"🎫 订单 ***{tail} [{keyword}/{sku or '通用'}] 待送达 {len(to_send)} 张，"
+                        f"累计绑定 {bound}/{quantity}")
 
-        if not parts:
+        complete = bound >= quantity
+        if parts:
+            header = ("【自动补发】亲，您的剩余宝贝到啦：" if already_told and to_send
+                      else "【自动发货】亲，感谢您的购买！宝贝内容如下：")
+            full_msg = f"{header}\n\n" + "\n\n".join(parts) + "\n\n如有任何问题随时发消息联系，祝您生活愉快！"
+            try:
+                await send_msg_func(ws, chat_id, user_id, full_msg)
+            except Exception as e:
+                # 卡已绑定在本单名下但未送达：保持可重跑状态，下次会原样再发，不会换卡也不会丢卡
+                self.upsert_order(order_id, status=order["status"] if order["status"] in RETRYABLE else "processing")
+                logger.error(f"订单 ***{tail} 发货消息发送失败，稍后重试: {type(e).__name__}")
+                return False
+            new_sent = max([int(c["order_seq"]) for c in to_send], default=sent_count)
+            self.upsert_order(order_id, sent_count=new_sent, fixed_sent=1 if (fixed_content or fixed_sent) else 0,
+                              delivered_count=bound)
+            sent_count = new_sent
+            logger.info(f"✅ 发货消息已送达买家（订单 ***{tail}）")
+        elif not already_told and not use_card_pool:
             logger.warning(f"⚠️ 规则 [{keyword}] 未配置任何发货内容")
+            return _manual("规则未配置发货内容")
+        else:
+            full_msg = ""
+            logger.info(f"订单 ***{tail} 无新内容可发，暂不打扰买家")
+
+        delivered_all = complete and (not use_card_pool or sent_count >= quantity)
+        if not delivered_all:
+            # 没发齐绝不确认发货：否则订单会走向自动确认收货，买家却没拿到全部卡密
+            status = "partial" if bound else "pending_stock"
+            confirm_status = f"缺货待补发 {quantity - bound}/{quantity}"
+            self.upsert_order(order_id, delivered_count=bound, status=status, confirm_status=confirm_status)
+            if full_msg:
+                self.record_log(order_id, user_id, chat_id, f"{keyword}{('/' + sku) if sku else ''}",
+                                full_msg, confirm_status)
             return False
 
-        header = "【自动补发】亲，您的剩余宝贝到啦：" if is_resend else "【自动发货】亲，感谢您的购买！宝贝内容如下："
-        full_msg = f"{header}\n\n" + "\n\n".join(parts) + "\n\n如有任何问题随时发消息联系，祝您生活愉快！"
-        await send_msg_func(ws, chat_id, user_id, full_msg)
-        logger.info(f"✅ 发货消息已送达买家（订单 ***{tail}）")
-
-        if complete:
-            status, confirm_status = "delivered", "未开启自动确认"
-            if rule.get("auto_confirm", 1):
+        status, confirm_status = "delivered", "未开启自动确认"
+        if rule.get("auto_confirm", 1):
+            try:
                 ok, msg = self.delivery_service.confirm_dummy_shipping(order_id, trade_text="虚拟商品已自动交付")
-                confirm_status = "成功" if ok else f"失败: {msg}"
-        else:
-            # 没发齐绝不确认发货：否则订单会走向自动确认收货，买家却没拿到全部卡密
-            status = "partial" if delivered else "pending_stock"
-            confirm_status = f"缺货待补发 {quantity - delivered}/{quantity}"
-
-        self.upsert_order(order_id, delivered_count=delivered, status=status)
+            except Exception as e:  # 网络异常等
+                ok, msg = False, type(e).__name__
+            confirm_status = "成功" if ok else f"失败: {msg}"
+            if not ok:
+                status = "confirm_failed"  # 买家已拿到全部内容；只需重跑确认发货
+        self.upsert_order(order_id, delivered_count=bound, status=status, confirm_status=confirm_status)
         self.record_log(order_id, user_id, chat_id, f"{keyword}{('/' + sku) if sku else ''}",
-                        full_msg, confirm_status)
-        return complete
+                        full_msg or "（重试确认发货）", confirm_status)
+        return status == "delivered"

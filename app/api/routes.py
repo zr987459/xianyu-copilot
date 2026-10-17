@@ -294,18 +294,39 @@ class SingleCardCreate(BaseModel):
     sku: str = Field("", max_length=40)  # 套餐/规格，留空=商品通用池
 
 
+def _insert_cards(keyword: str, sku: str, cards):
+    """入库并跨批次去重：同一商品下内容相同的卡（不论套餐）只入一次，避免一卡卖两次。
+
+    返回 (新增数, 跳过的重复数, 该池待补发订单数)。
+    """
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        added = 0
+        for card in cards:
+            cur = conn.execute(
+                "INSERT INTO card_keys (keyword, sku, card_content, is_used) "
+                "SELECT ?, ?, ?, 0 WHERE NOT EXISTS (SELECT 1 FROM card_keys WHERE keyword=? AND card_content=?)",
+                (keyword, sku, card, keyword, card),
+            )
+            added += cur.rowcount
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM delivery_orders WHERE keyword=? AND sku=? "
+            "AND status IN ('partial','pending_stock')", (keyword, sku)).fetchone()[0]
+        conn.commit()
+        return added, len(cards) - added, waiting
+    finally:
+        conn.close()
+
+
 @app.post("/api/cards/add")
 def add_single_card(data: SingleCardCreate):
     if not data.keyword.strip() or not data.card_content.strip():
         raise HTTPException(status_code=400, detail="keyword 与 card_content 不能为空")
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO card_keys (keyword, sku, card_content, is_used) VALUES (?, ?, ?, 0)",
-        (data.keyword.strip(), data.sku.strip(), data.card_content.strip()),
-    )
-    conn.commit()
-    conn.close()
-    return {"success": True}
+    added, dup, waiting = _insert_cards(data.keyword.strip(), data.sku.strip(), [data.card_content.strip()])
+    if not added:
+        raise HTTPException(status_code=409, detail="该卡密已在库中（同一商品下不允许重复入库）")
+    return {"success": True, "waiting_orders": waiting}
 
 
 class BatchCardImport(BaseModel):
@@ -321,14 +342,9 @@ def import_cards(data: BatchCardImport):
         raise HTTPException(status_code=400, detail="keyword 不能为空")
     # 去掉空行与本批重复行，避免同一张卡入库两次被发给两个买家
     lines = list(dict.fromkeys(ln.strip() for ln in data.raw_keys.splitlines() if ln.strip()))
-    conn = get_db()
-    c = conn.cursor()
-    sku = data.sku.strip()
-    c.executemany("INSERT INTO card_keys (keyword, sku, card_content, is_used) VALUES (?, ?, ?, 0)",
-                  [(keyword, sku, card) for card in lines])
-    conn.commit()
-    conn.close()
-    return {"success": True, "count": len(lines)}
+    added, dup, waiting = _insert_cards(keyword, data.sku.strip(), lines)
+    # waiting_orders > 0 时由监听进程对 pending_orders(keyword, sku) 重跑补发
+    return {"success": True, "count": added, "duplicates": dup, "waiting_orders": waiting}
 
 
 @app.get("/api/cards/list")
@@ -369,7 +385,7 @@ def get_delivery_orders(status: Optional[str] = ""):
     conn = get_db()
     q = "SELECT * FROM delivery_orders"
     if status == "pending":
-        q += " WHERE status IN ('partial','pending_stock','manual')"
+        q += " WHERE status IN ('partial','pending_stock','confirm_failed','manual')"
     rows = conn.execute(q + " ORDER BY updated_at DESC LIMIT 100").fetchall()
     conn.close()
     return {"orders": [dict(r) for r in rows]}
