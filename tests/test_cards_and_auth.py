@@ -18,7 +18,6 @@ def db(tmp_path, monkeypatch):
     database.init_db()
     c = sqlite3.connect(path)
     c.execute("PRAGMA journal_mode=WAL;")
-    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_card_order ON card_keys(order_id) WHERE order_id IS NOT NULL;")
     c.executemany("INSERT INTO card_keys(keyword, card_content) VALUES('vip', ?)", [(f"K{i}",) for i in range(50)])
     c.commit(); c.close()
     return path

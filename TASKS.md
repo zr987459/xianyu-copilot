@@ -9,4 +9,4 @@
 - [x] T-007: 委托 Hark (Claude Opus 5.5) 进行代码架构、UI组件体系与移动端原生交互审查
 - [x] T-008: 采纳 Hark 优化建议（原子并发出库、ADMIN_TOKEN鉴权、白名单防路径逃逸、XSS安全转义、毛玻璃移动端UI）
 - [x] T-009: 跑通并发压测与安全自动化测试用例 (tests/test_cards_and_auth.py)
-
+- [ ] T-015: 多规格套餐（SKU）与一次拍多件发货引擎（Hark，分支 hark/feat-sku-and-multi-qty，待审；依赖 T-010 监听器传入 sku_desc / quantity）详见 docs/design/sku-multi-qty.md

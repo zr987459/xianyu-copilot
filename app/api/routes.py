@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from app.db.database import get_db, init_db, DB_PATH
-from app.db.cards import claim_card as _claim_card, StockLockError
+from app.db.cards import claim_card as _claim_card, claim_cards as _claim_cards, StockLockError, normalize_sku, stock_by_sku, MAX_QUANTITY
 from app.core.security import AdminAuthMiddleware
 from app.services.publisher_service import XianyuPublisherService
 from app.services.XianyuApis import XianyuApis
@@ -52,14 +52,7 @@ def startup_event():
     conn = get_db()
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_order "
-        "ON card_keys(order_id) WHERE order_id IS NOT NULL;"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_card_claim "
-        "ON card_keys(keyword, is_used, id);"
-    )
+    # 卡密索引在 init_db 的 T-015 迁移里维护（订单+序号唯一，支持一单多卡），这里不能再建「一单一卡」唯一索引
     conn.commit()
     conn.close()
 
@@ -74,19 +67,24 @@ def claim_card(keyword: str, order_id: str):
 class ClaimRequest(BaseModel):
     keyword: str
     order_id: str
+    sku: Optional[str] = ""
+    quantity: int = 1
 
 
 @app.post("/api/cards/claim")
 def claim_card_api(data: ClaimRequest):
+    from app.db import database
     try:
-        card = claim_card(data.keyword, data.order_id)
+        res = _claim_cards(database.DB_PATH, data.keyword, data.order_id, data.quantity, data.sku or "")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except StockLockError:
         raise HTTPException(status_code=503, detail="库存繁忙，请稍后重试")
-    if card is None:
-        raise HTTPException(status_code=409, detail="库存不足，卡密已被抢空")
-    return {"success": True, "card_content": card["card_content"]}
+    if not res.complete:
+        # 全有或全无：一张都没占，库存回来后用同一 order_id 重试即可
+        raise HTTPException(status_code=409, detail=f"库存不足：需要 {res.requested} 张，可用 {res.available} 张")
+    cards = [c["card_content"] for c in res.cards]
+    return {"success": True, "card_content": cards[0], "cards": cards, "count": len(cards)}
 
 
 # ========= 概览指标 =========
@@ -164,11 +162,33 @@ def get_chat_messages(user_id: str, item_id: str):
 
 
 # ========= 发货规则 & 卡密池 Tab =========
+class RuleVariant(BaseModel):
+    sku_pattern: str                       # 匹配订单规格的词：年卡 / 专业版；* = 兜底
+    card_sku: Optional[str] = None         # 出库套餐，默认同 sku_pattern
+    delivery_content: Optional[str] = ""   # 该套餐专属说明 / 网盘，空 = 沿用规则固定内容
+    use_card_pool: Optional[bool] = None   # None = 沿用规则设置
+
+
 class RuleCreate(BaseModel):
     keyword: str
     delivery_content: Optional[str] = ""
     use_card_pool: bool = False
     auto_confirm: bool = True
+    variants: Optional[List[RuleVariant]] = None  # None = 不改动已有套餐；[] = 清空套餐
+
+
+def _rule_variants(c, rule_id, keyword):
+    out = []
+    for v in c.execute("SELECT * FROM delivery_rule_skus WHERE rule_id=? ORDER BY id", (rule_id,)).fetchall():
+        v = dict(v)
+        pat = v["sku_pattern"]
+        card_sku = v["card_sku"] or ("" if pat == "*" else normalize_sku(pat))
+        v["card_sku"] = card_sku
+        v["card_stock"] = c.execute(
+            "SELECT COUNT(*) FROM card_keys WHERE keyword=? AND sku=? AND is_used=0",
+            (keyword, card_sku)).fetchone()[0]
+        out.append(v)
+    return out
 
 
 @app.get("/api/delivery/rules")
@@ -191,6 +211,11 @@ def get_delivery_rules():
         item["card_total"] = stock["total"] or 0
         item["card_stock"] = stock["unused"] or 0
         item["card_used"] = stock["used"] or 0
+        item["variants"] = _rule_variants(c, item["id"], item["keyword"])
+        item["sku_stock"] = stock_by_sku(c, item["keyword"])
+        if not item["variants"]:
+            # 没配套餐的规则只从默认套餐出库，剩余数也只算默认套餐
+            item["card_stock"] = sum(s["unused"] for s in item["sku_stock"] if s["sku"] == "")
         rules.append(item)
     conn.close()
     return {"rules": rules}
@@ -198,25 +223,60 @@ def get_delivery_rules():
 
 @app.post("/api/delivery/rules")
 def create_rule(data: RuleCreate):
+    keyword = data.keyword.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword 不能为空")
+    variants = None
+    if data.variants is not None:
+        variants, seen = [], set()
+        for v in data.variants:
+            pat = v.sku_pattern.strip()
+            key = normalize_sku(pat).casefold()
+            if not key:
+                raise HTTPException(status_code=400, detail="套餐匹配词不能为空")
+            if key in seen:
+                raise HTTPException(status_code=400, detail=f"套餐「{pat}」重复")
+            seen.add(key)
+            variants.append(v)
+        if len(variants) > 30:
+            raise HTTPException(status_code=400, detail="单条规则最多 30 个套餐")
     conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT OR REPLACE INTO auto_delivery_rules
-            (keyword, delivery_content, use_card_pool, auto_confirm, enabled)
-        VALUES (?, ?, ?, ?, 1)
-        """,
-        (data.keyword.strip(), data.delivery_content.strip(),
-         1 if data.use_card_pool else 0, 1 if data.auto_confirm else 0),
-    )
-    conn.commit()
-    conn.close()
-    return {"success": True}
+    try:
+        c = conn.cursor()
+        # 用 UPSERT 而不是 INSERT OR REPLACE：后者会删行重建、换掉 id，套餐映射就成了孤儿
+        rule_id = c.execute(
+            """
+            INSERT INTO auto_delivery_rules (keyword, delivery_content, use_card_pool, auto_confirm, enabled)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(keyword) DO UPDATE SET
+                delivery_content=excluded.delivery_content,
+                use_card_pool=excluded.use_card_pool,
+                auto_confirm=excluded.auto_confirm,
+                enabled=1
+            RETURNING id
+            """,
+            (keyword, (data.delivery_content or "").strip(),
+             1 if data.use_card_pool else 0, 1 if data.auto_confirm else 0),
+        ).fetchone()[0]
+        if variants is not None:
+            c.execute("DELETE FROM delivery_rule_skus WHERE rule_id=?", (rule_id,))
+            c.executemany(
+                "INSERT INTO delivery_rule_skus (rule_id, sku_pattern, card_sku, delivery_content, use_card_pool) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(rule_id, v.sku_pattern.strip(),
+                  normalize_sku(v.card_sku) if v.card_sku else ("" if v.sku_pattern.strip() == "*" else normalize_sku(v.sku_pattern)),
+                  (v.delivery_content or "").strip() or None,
+                  None if v.use_card_pool is None else int(v.use_card_pool)) for v in variants])
+        conn.commit()
+    finally:
+        conn.close()
+    return {"success": True, "id": rule_id}
 
 
 @app.delete("/api/delivery/rules/{rule_id}")
 def delete_rule(rule_id: int):
     conn = get_db()
+    conn.execute("DELETE FROM delivery_rule_skus WHERE rule_id=?", (rule_id,))
     conn.execute("DELETE FROM auto_delivery_rules WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
@@ -226,6 +286,7 @@ def delete_rule(rule_id: int):
 class SingleCardCreate(BaseModel):
     keyword: str
     card_content: str
+    sku: Optional[str] = ""   # 套餐 / 规格，空 = 默认套餐
 
 
 @app.post("/api/cards/add")
@@ -234,8 +295,8 @@ def add_single_card(data: SingleCardCreate):
         raise HTTPException(status_code=400, detail="keyword 与 card_content 不能为空")
     conn = get_db()
     conn.execute(
-        "INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-        (data.keyword.strip(), data.card_content.strip()),
+        "INSERT INTO card_keys (keyword, sku, card_content, is_used) VALUES (?, ?, ?, 0)",
+        (data.keyword.strip(), normalize_sku(data.sku), data.card_content.strip()),
     )
     conn.commit()
     conn.close()
@@ -245,6 +306,7 @@ def add_single_card(data: SingleCardCreate):
 class BatchCardImport(BaseModel):
     keyword: str
     raw_keys: str
+    sku: Optional[str] = ""
 
 
 @app.post("/api/cards/import")
@@ -256,21 +318,25 @@ def import_cards(data: BatchCardImport):
     lines = list(dict.fromkeys(ln.strip() for ln in data.raw_keys.splitlines() if ln.strip()))
     conn = get_db()
     c = conn.cursor()
-    c.executemany("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-                  [(keyword, card) for card in lines])
+    sku = normalize_sku(data.sku)
+    c.executemany("INSERT INTO card_keys (keyword, sku, card_content, is_used) VALUES (?, ?, ?, 0)",
+                  [(keyword, sku, card) for card in lines])
     conn.commit()
     conn.close()
-    return {"success": True, "count": len(lines)}
+    return {"success": True, "count": len(lines), "sku": sku}
 
 
 @app.get("/api/cards/list")
-def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
+def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all", sku: Optional[str] = None):
     conn = get_db()
     query = "SELECT * FROM card_keys WHERE 1=1"
     params = []
     if keyword:
         query += " AND keyword=?"
         params.append(keyword)
+    if sku is not None:  # sku= 空串 → 只看默认套餐；不传 → 全部套餐
+        query += " AND sku=?"
+        params.append(normalize_sku(sku))
     if status == "unused":
         query += " AND is_used=0"
     elif status == "used":
@@ -279,6 +345,16 @@ def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return {"cards": [dict(r) for r in rows]}
+
+
+@app.get("/api/cards/skus")
+def get_card_skus(keyword: Optional[str] = ""):
+    """按「关键词 × 套餐」统计库存分布，供录入框联想与规则卡片展示。"""
+    conn = get_db()
+    try:
+        return {"skus": stock_by_sku(conn, keyword or None)}
+    finally:
+        conn.close()
 
 
 @app.delete("/api/cards/{card_id}")
