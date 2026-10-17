@@ -151,8 +151,15 @@
               <button onclick="setCardEntryMode('batch')" id="btn-card-mode-batch" class="px-2 py-0.5 rounded text-slate-500 font-medium">批量导入</button>
             </div>
           </div>
-          <input type="text" id="card-input-keyword" placeholder="所属商品关键词 (如: 激活码 / 月卡 / 百度网盘)" 
-            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+          <div class="grid grid-cols-5 gap-2">
+            <input type="text" id="card-input-keyword" list="dl-keywords" placeholder="商品关键词 (如: 网易云音乐)"
+              class="col-span-3 w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+            <input type="text" id="card-input-sku" list="dl-skus" placeholder="套餐 (可选)" maxlength="40"
+              class="col-span-2 w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+          </div>
+          <datalist id="dl-keywords"></datalist>
+          <datalist id="dl-skus"></datalist>
+          <p class="text-[10px] text-slate-400 -mt-1">套餐留空 = 该商品通用池；填「月卡 / 年卡 / 专业版」则只发给拍了该规格的订单</p>
           
           <div id="card-mode-single-box">
             <input type="text" id="card-input-single" placeholder="输入单条卡密 (如: ABCD-1234-EFGH-5678)" 
@@ -167,10 +174,19 @@
           </div>
         </div>
 
+        <!-- 套餐库存分布 -->
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-slate-900">套餐库存分布</span>
+            <span class="text-[10px] text-slate-400">点套餐筛选明细 · 少于 3 张标红</span>
+          </div>
+          <div id="card-stock-dist" class="space-y-2"></div>
+        </div>
+
         <!-- 卡密列表与过滤 -->
         <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
           <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-slate-900">卡密库存明细</span>
+            <span class="text-xs font-bold text-slate-900">卡密库存明细 <span id="card-scope-label" class="font-normal text-brand"></span></span>
             <div class="flex space-x-1 text-[11px]">
               <button onclick="filterCardTable('all')" id="ftab-all" class="px-2 py-0.5 rounded-md bg-slate-200 text-slate-800 font-medium">全部</button>
               <button onclick="filterCardTable('unused')" id="ftab-unused" class="px-2 py-0.5 rounded-md text-slate-500 font-medium">在库</button>
@@ -193,11 +209,29 @@
           
           <div class="flex items-center space-x-2 p-2 bg-slate-50 rounded-lg border border-slate-100">
             <input type="checkbox" id="rule-use-pool" class="w-4 h-4 text-brand rounded border-slate-300 focus:ring-brand" checked>
-            <label for="rule-use-pool" class="text-xs text-slate-700 font-medium cursor-pointer">🎫 关联卡密池（每单自动抽取 1 张未发卡密）</label>
+            <label for="rule-use-pool" class="text-xs text-slate-700 font-medium cursor-pointer">🎫 关联卡密池（拍 N 件发 N 张独享卡密）</label>
           </div>
 
           <textarea id="rule-fixed-text" placeholder="固定下发说明或网盘地址 (可选)：&#10;网盘链接: https://pan.baidu.com/... 提取码: 1234" 
             class="w-full h-16 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand"></textarea>
+
+          <!-- 套餐细分 -->
+          <div class="p-2.5 bg-slate-50 rounded-lg border border-slate-100 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold text-slate-800">📦 套餐 / 规格细分 <span class="font-normal text-slate-400">(可选)</span></span>
+              <button type="button" id="btn-add-sku" class="text-[11px] text-brand font-semibold">＋ 添加套餐</button>
+            </div>
+            <p class="text-[10px] text-slate-400 leading-snug">配置后按买家拍下的规格出库：「月卡」只发月卡池。别名用逗号分隔（如 1个月,30天）。有套餐但规格对不上的订单会转人工，不会错发。</p>
+            <div id="rule-sku-rows" class="space-y-2"></div>
+          </div>
+
+          <div class="flex items-center justify-between p-2 bg-slate-50 rounded-lg border border-slate-100">
+            <span class="text-xs text-slate-700 font-medium">一单多件缺货时</span>
+            <select id="rule-shortage" class="text-[11px] bg-white border border-slate-200 rounded-md px-1.5 py-1">
+              <option value="partial">有几张先发几张，余量补货后自动补发</option>
+              <option value="hold">凑齐再一次性发出</option>
+            </select>
+          </div>
           
           <button onclick="submitDeliveryRule()" class="w-full py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition shadow-sm">➕ 保存规则</button>
         </div>
@@ -614,13 +648,15 @@
       const res = await fetch('/api/cards/add', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ keyword: kw, card_content: content })
-      }).then(r => r.json());
-      if (res.success) {
+        body: JSON.stringify({ keyword: kw, sku: document.getElementById('card-input-sku').value.trim(), card_content: content })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) { alert('⚠️ 该卡密已在库中，未重复入库（同一商品下一卡只能卖一次）'); return; }
+      if (data.success) {
         document.getElementById('card-input-single').value = '';
         loadCardsStock();
         loadStats();
-        alert('🎉 单个卡密已成功录入！');
+        alert('🎉 单个卡密已成功录入！' + (data.waiting_orders ? `\n有 ${data.waiting_orders} 单在等这个套餐补货，将自动补发。` : ''));
       }
     }
 
@@ -631,13 +667,16 @@
       const res = await fetch('/api/cards/import', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ keyword: kw, raw_keys: raw })
+        body: JSON.stringify({ keyword: kw, sku: document.getElementById('card-input-sku').value.trim(), raw_keys: raw })
       }).then(r => r.json());
       if (res.success) {
         document.getElementById('card-input-batch').value = '';
         loadCardsStock();
         loadStats();
-        alert(`🎉 成功导入 ${res.count} 条卡密入库！`);
+        let tip = `🎉 成功导入 ${res.count} 条卡密入库！`;
+        if (res.duplicates) tip += `\n已跳过 ${res.duplicates} 条库中已存在的重复卡密。`;
+        if (res.waiting_orders) tip += `\n有 ${res.waiting_orders} 单在等这个套餐补货，将自动补发。`;
+        alert(tip);
       }
     }
 
@@ -653,9 +692,69 @@
       loadCardsStock();
     }
 
+    // 当前明细筛选范围：null = 全部；{keyword, sku}
+    let cardScope = null;
+    function setCardScope(scope) {
+      cardScope = scope;
+      document.getElementById('card-scope-label').textContent =
+        scope ? `· ${scope.keyword} / ${scope.sku || '通用'}（点此清除）` : '';
+      loadCardsStock();
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('card-scope-label').onclick = () => setCardScope(null);
+    });
+
+    async function loadStockDist() {
+      const box = document.getElementById('card-stock-dist');
+      const res = await fetch('/api/cards/stock').then(r => r.json());
+      const stock = res.stock || [];
+      box.innerHTML = '';
+      const kwList = document.getElementById('dl-keywords');
+      const skuList = document.getElementById('dl-skus');
+      kwList.innerHTML = ''; skuList.innerHTML = '';
+      const kws = new Set(), skus = new Set();
+      if (stock.length === 0) {
+        box.innerHTML = '<div class="text-center py-3 text-xs text-slate-500">暂无库存</div>';
+        return;
+      }
+      const groups = {};
+      stock.forEach(s => { (groups[s.keyword] = groups[s.keyword] || []).push(s); kws.add(s.keyword); if (s.sku) skus.add(s.sku); });
+      kws.forEach(k => { const o = document.createElement('option'); o.value = k; kwList.appendChild(o); });
+      skus.forEach(k => { const o = document.createElement('option'); o.value = k; skuList.appendChild(o); });
+      Object.keys(groups).forEach(kw => {
+        const row = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'text-[11px] font-semibold text-slate-700 mb-1';
+        const total = groups[kw].reduce((a, s) => a + s.unused, 0);
+        title.textContent = `${kw} · 在库 ${total}`;
+        const chips = document.createElement('div');
+        chips.className = 'flex flex-wrap gap-1.5';
+        groups[kw].forEach(s => {
+          const low = s.unused < 3;
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = `px-2 py-1 rounded-lg border text-[11px] text-left ${low ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`;
+          const name = document.createElement('span');
+          name.className = 'font-semibold';
+          name.textContent = s.sku || '通用';
+          const num = document.createElement('span');
+          num.className = 'ml-1';
+          num.textContent = `${s.unused} 在库 · ${s.used} 已发`;
+          chip.appendChild(name); chip.appendChild(num);
+          chip.onclick = () => setCardScope({ keyword: s.keyword, sku: s.sku });
+          chips.appendChild(chip);
+        });
+        row.appendChild(title); row.appendChild(chips);
+        box.appendChild(row);
+      });
+    }
+
     async function loadCardsStock() {
+      loadStockDist();
       const box = document.getElementById('card-table-list');
-      const res = await fetch(`/api/cards/list?status=${cardTableFilter}`).then(r => r.json());
+      const qs = new URLSearchParams({ status: cardTableFilter });
+      if (cardScope) { qs.set('keyword', cardScope.keyword); qs.set('sku', cardScope.sku || ''); }
+      const res = await fetch(`/api/cards/list?${qs.toString()}`).then(r => r.json());
       const cards = res.cards || [];
       box.innerHTML = '';
       if (cards.length === 0) {
@@ -673,10 +772,12 @@
         top.className = "flex items-center space-x-1.5";
         const kwSpan = document.createElement('span');
         kwSpan.className = "font-bold text-slate-900 truncate";
-        kwSpan.textContent = `[${c.keyword}]`;
+        kwSpan.textContent = c.sku ? `[${c.keyword} · ${c.sku}]` : `[${c.keyword}]`;
         const stSpan = document.createElement('span');
         stSpan.className = `${isUsed ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold`;
-        stSpan.textContent = isUsed ? '🔴 已发' : '🟢 在库就绪';
+        stSpan.textContent = isUsed
+          ? `🔴 已发${c.order_id ? ' · 单尾 ' + String(c.order_id).slice(-4) + (c.order_seq ? ' 第' + c.order_seq + '件' : '') : ''}`
+          : '🟢 在库就绪';
         top.appendChild(kwSpan);
         top.appendChild(stSpan);
 
@@ -693,7 +794,7 @@
         delBtn.className = "text-rose-500 text-[10px] hover:underline";
         delBtn.textContent = '删除';
         delBtn.onclick = () => delCardItem(c.id);
-        right.appendChild(delBtn);
+        if (!isUsed) right.appendChild(delBtn);  // 已发卡密是售后凭证，不提供删除
 
         item.appendChild(left);
         item.appendChild(right);
@@ -703,25 +804,88 @@
 
     async function delCardItem(id) {
       if (!confirm('确认删除此卡密？')) return;
-      await fetch(`/api/cards/${id}`, { method: 'DELETE' });
+      const r = await fetch(`/api/cards/${id}`, { method: 'DELETE' });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.detail || '删除失败'); }
       loadCardsStock();
       loadStats();
     }
 
     // 复合发货规则
+    // 套餐细分行（全部 createElement + value，避免拼 HTML）
+    function addSkuRow(init) {
+      init = init || {};
+      const box = document.getElementById('rule-sku-rows');
+      const row = document.createElement('div');
+      row.className = 'sku-row bg-white p-2 rounded-lg border border-slate-200 space-y-1.5';
+      const line = document.createElement('div');
+      line.className = 'flex items-center gap-1.5';
+      const mk = (cls, ph, val, max) => {
+        const i = document.createElement('input');
+        i.type = 'text'; i.className = cls + ' px-2 py-1 text-[11px] bg-slate-50 rounded-md border border-slate-200 min-w-0';
+        i.placeholder = ph; i.value = val || ''; i.maxLength = max; return i;
+      };
+      const name = mk('sku-name w-20 shrink-0', '套餐名', init.sku_name, 40);
+      const alias = mk('sku-alias flex-1', '别名 (逗号分隔)', init.aliases, 200);
+      const pool = document.createElement('label');
+      pool.className = 'flex items-center text-[10px] text-slate-600 shrink-0';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.className = 'sku-pool w-3.5 h-3.5 mr-0.5'; cb.checked = init.use_card_pool !== 0 && init.use_card_pool !== false;
+      pool.appendChild(cb); pool.appendChild(document.createTextNode('卡密'));
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'text-rose-500 text-[11px] shrink-0'; del.textContent = '✕';
+      del.onclick = () => row.remove();
+      line.append(name, alias, pool, del);
+      const txt = document.createElement('textarea');
+      txt.className = 'sku-text w-full h-10 px-2 py-1 text-[11px] bg-slate-50 rounded-md border border-slate-200';
+      txt.placeholder = '该套餐专属说明 / 网盘 (可选，留空沿用上方通用说明)';
+      txt.maxLength = 4000; txt.value = init.delivery_content || '';
+      row.append(line, txt);
+      box.appendChild(row);
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('btn-add-sku').onclick = () => addSkuRow();
+    });
+
+    function collectSkuRows() {
+      return Array.from(document.querySelectorAll('#rule-sku-rows .sku-row')).map(r => ({
+        sku_name: r.querySelector('.sku-name').value.trim(),
+        aliases: r.querySelector('.sku-alias').value.trim(),
+        use_card_pool: r.querySelector('.sku-pool').checked,
+        delivery_content: r.querySelector('.sku-text').value.trim(),
+      })).filter(s => s.sku_name);
+    }
+
+    function editRule(r) {
+      document.getElementById('rule-kw').value = r.keyword;
+      document.getElementById('rule-use-pool').checked = !!r.use_card_pool;
+      document.getElementById('rule-fixed-text').value = r.delivery_content || '';
+      document.getElementById('rule-shortage').value = r.shortage_policy || 'partial';
+      document.getElementById('rule-sku-rows').innerHTML = '';
+      (r.skus || []).forEach(s => addSkuRow(s));
+      document.getElementById('rule-kw').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
     async function submitDeliveryRule() {
       const kw = document.getElementById('rule-kw').value.trim();
       const usePool = document.getElementById('rule-use-pool').checked;
       const fixed = document.getElementById('rule-fixed-text').value.trim();
+      const skus = collectSkuRows();
       if (!kw) { alert('请输入关键词！'); return; }
-      if (!usePool && !fixed) { alert('必须至少选择一种发货方式！'); return; }
-      await fetch('/api/delivery/rules', {
+      if (!usePool && !fixed && skus.length === 0) { alert('必须至少选择一种发货方式！'); return; }
+      const names = skus.map(s => s.sku_name);
+      if (new Set(names).size !== names.length) { alert('套餐名不能重复'); return; }
+      const r = await fetch('/api/delivery/rules', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ keyword: kw, use_card_pool: usePool, delivery_content: fixed })
+        body: JSON.stringify({
+          keyword: kw, use_card_pool: usePool, delivery_content: fixed,
+          shortage_policy: document.getElementById('rule-shortage').value, skus
+        })
       });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(typeof e.detail === 'string' ? e.detail : '保存失败，请检查输入'); return; }
       document.getElementById('rule-kw').value = '';
       document.getElementById('rule-fixed-text').value = '';
+      document.getElementById('rule-sku-rows').innerHTML = '';
       loadDeliveryRules();
       alert('✅ 自动发货规则已生效！');
     }
@@ -744,19 +908,26 @@
         const kwSpan = document.createElement('span');
         kwSpan.className = "text-slate-900";
         kwSpan.textContent = r.keyword;
+        const ops = document.createElement('div');
+        ops.className = 'space-x-2';
+        const editBtn = document.createElement('button');
+        editBtn.className = "text-brand text-[11px]";
+        editBtn.textContent = '编辑';
+        editBtn.onclick = () => editRule(r);
         const delBtn = document.createElement('button');
         delBtn.className = "text-rose-500 text-[11px]";
         delBtn.textContent = '删除';
         delBtn.onclick = () => delRuleItem(r.id);
+        ops.append(editBtn, delBtn);
         top.appendChild(kwSpan);
-        top.appendChild(delBtn);
+        top.appendChild(ops);
 
         const mid = document.createElement('div');
         mid.className = "flex items-center space-x-1.5";
         if (r.use_card_pool) {
           const poolBadge = document.createElement('span');
           poolBadge.className = "bg-blue-50 text-brand px-1.5 py-0.5 rounded text-[10px] font-semibold";
-          poolBadge.textContent = `🎫 卡密池 (剩余 ${r.card_stock})`;
+          poolBadge.textContent = (r.skus && r.skus.length) ? `🎫 通用池 ${r.generic_stock}` : `🎫 卡密池 (剩余 ${r.card_stock})`;
           mid.appendChild(poolBadge);
         }
         if (r.delivery_content) {
@@ -766,8 +937,39 @@
           mid.appendChild(fixBadge);
         }
 
+        const policy = document.createElement('span');
+        policy.className = "bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded text-[10px]";
+        policy.textContent = r.shortage_policy === 'hold' ? '缺货凑齐再发' : '缺货先发后补';
+        mid.appendChild(policy);
+
         card.appendChild(top);
         card.appendChild(mid);
+
+        if (r.skus && r.skus.length) {
+          const map = document.createElement('div');
+          map.className = 'grid grid-cols-2 gap-1.5';
+          r.skus.forEach(s => {
+            const low = s.use_card_pool && s.card_stock < 3;
+            const cell = document.createElement('div');
+            cell.className = `p-1.5 rounded-lg border ${low ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-slate-50'}`;
+            const n = document.createElement('div');
+            n.className = 'font-semibold text-slate-800 truncate';
+            n.textContent = '📦 ' + s.sku_name;
+            const meta = document.createElement('div');
+            meta.className = `text-[10px] ${low ? 'text-rose-600' : 'text-slate-500'} truncate`;
+            meta.textContent = (s.use_card_pool ? `卡密 ${s.card_stock} 在库 · ${s.card_used} 已发` : '仅说明')
+              + (s.delivery_content ? ' · 专属说明' : '');
+            cell.append(n, meta);
+            if (s.aliases) {
+              const a = document.createElement('div');
+              a.className = 'text-[10px] text-slate-400 truncate';
+              a.textContent = '别名: ' + s.aliases;
+              cell.appendChild(a);
+            }
+            map.appendChild(cell);
+          });
+          card.appendChild(map);
+        }
 
         if (r.delivery_content) {
           const fixP = document.createElement('p');

@@ -10,3 +10,4 @@
 - [x] T-008: 采纳 Hark 优化建议（原子并发出库、ADMIN_TOKEN鉴权、白名单防路径逃逸、XSS安全转义、毛玻璃移动端UI）
 - [x] T-009: 跑通并发压测与安全自动化测试用例 (tests/test_cards_and_auth.py)
 
+- [x] T-010: 多规格套餐 (SKU) 与一次拍多件 (Multi-quantity) 发货引擎（分支 hark/feat-sku-and-multi-qty，待真实 WSS 报文校准 sku/数量字段）
