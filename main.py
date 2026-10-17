@@ -12,6 +12,12 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app", "st
 async def read_index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
+@app.get("/sw.js")
+async def service_worker():
+    # 根路径下发，作用域覆盖整站
+    return FileResponse(os.path.join(STATIC_DIR, "sw.js"), media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "9005"))
     print(f"🚀 Xianyu Copilot 服务正在启动: http://0.0.0.0:{port}")

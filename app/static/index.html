@@ -63,6 +63,7 @@
   </header>
 
   <!-- 主体可滚动内容区 -->
+  <div id="net-banner" class="hidden text-center text-[11px] py-1 bg-amber-50 text-amber-700 border-b border-amber-200">离线中，显示的是上次同步的数据</div>
   <main class="flex-1 overflow-y-auto no-scrollbar relative bg-slate-50" id="main-scroll">
     
     <!-- ==================== TAB 1: 消息 (Messages) ==================== -->
@@ -395,7 +396,10 @@
         const res = await fetch('/api/chats').then(r => r.json());
         allChats = res.chats || [];
         renderChatList(allChats);
+        localStorage.setItem('xc_cache_chats', JSON.stringify(allChats));  // 离线兜底（不含卡密）
       } catch (e) {
+        const cached = JSON.parse(localStorage.getItem('xc_cache_chats') || 'null');
+        if (cached) { allChats = cached; renderChatList(cached); return; }
         box.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">拉取会话失败</div>';
       }
     }
@@ -767,11 +771,60 @@
       alert('✅ 提示词已保存生效！');
     }
 
+    // ===== 实时通道：指数退避 + 抖动 + 心跳看门狗 + seq 补洞 + 前台恢复 =====
+    const Realtime = {
+      ws: null, retry: 0, timer: null, watchdog: null,
+      seq: Number(sessionStorage.getItem('xc_seq') || 0),
+      connect() {
+        if (this.ws && this.ws.readyState <= 1) return;
+        if (!navigator.onLine) return;
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = this.ws = new WebSocket(`${proto}://${location.host}/ws/events`);
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ auth: localStorage.getItem('xc_token') || '', since: this.seq }));
+          this.retry = 0; this.kick(); setNetState(true);
+        };
+        ws.onmessage = ev => {
+          this.kick();
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'ping') return;
+          if (msg.type === 'resync') return refreshCurrentTab();     // 缺口过大，全量刷新
+          (msg.type === 'hello' ? msg.replay : [msg]).forEach(e => this.apply(e));
+        };
+        ws.onclose = ev => {
+          clearTimeout(this.watchdog);
+          if (ev.code === 4401) return;                              // 令牌错误不重连
+          setNetState(navigator.onLine && this.retry < 3);
+          const delay = Math.min(30000, 1000 * 2 ** this.retry++) * (0.5 + Math.random() / 2);
+          clearTimeout(this.timer); this.timer = setTimeout(() => this.connect(), delay);
+        };
+        ws.onerror = () => ws.close();
+      },
+      kick() {  // 60s 内无任何帧（服务端 25s ping）视为半开连接，主动断开重连
+        clearTimeout(this.watchdog);
+        this.watchdog = setTimeout(() => this.ws && this.ws.close(), 60000);
+      },
+      apply(e) {
+        if (e.seq) { this.seq = e.seq; sessionStorage.setItem('xc_seq', e.seq); }
+        const tab = document.querySelector('.tab-pane:not(.hidden)')?.id;
+        if (e.type === 'message' && tab === 'tab-messages') loadChats();
+        if (e.type === 'delivery' && tab === 'tab-orders') loadOrders();
+        if (e.type === 'stats') loadStats();
+      },
+      resume() { this.retry = 0; clearTimeout(this.timer); this.connect(); }
+    };
+    function setNetState(ok) { document.getElementById('net-banner').classList.toggle('hidden', ok); }
+    window.addEventListener('online', () => Realtime.resume());
+    window.addEventListener('offline', () => setNetState(false));
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) Realtime.resume(); });
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
     // 页面初始化
     loadStats();
     loadChats();
     lucide.createIcons();
-    setInterval(loadStats, 10000);
+    Realtime.connect();
+    setInterval(() => { if (!Realtime.ws || Realtime.ws.readyState !== 1) loadStats(); }, 30000);  // WS 不可用时降级轮询
   </script>
 </body>
 </html>

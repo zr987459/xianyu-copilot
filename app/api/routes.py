@@ -2,7 +2,10 @@ import os
 import sys
 import hmac
 import re
-from fastapi import FastAPI, Request, HTTPException
+import asyncio
+import json
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
+from app.core import events
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -338,3 +341,34 @@ def get_config():
                     elif k == "API_KEY":
                         cfg[k] = v[:6] + "..." + v[-4:] if len(v) > 10 else "***"
     return {"config": cfg}
+
+
+# --- 实时通道 ---
+@app.websocket("/ws/events")
+async def ws_events(ws: WebSocket):
+    """协议：连上后 5s 内发 {"auth": token, "since": lastSeq}；服务端 25s 一次 ping。
+    令牌不放 URL，避免进入反代访问日志。"""
+    await ws.accept()
+    try:
+        hello = json.loads(await asyncio.wait_for(ws.receive_text(), timeout=5))
+    except Exception:
+        await ws.close(code=4401); return
+    if not check_token(str(hello.get("auth", ""))):
+        await ws.close(code=4401); return
+
+    q = events.subscribe()
+    try:
+        missed = events.replay_since(int(hello.get("since") or 0))
+        await ws.send_json({"type": "resync"} if missed is None else {"type": "hello", "replay": missed})
+        while True:
+            try:
+                evt = await asyncio.wait_for(q.get(), timeout=25)
+            except asyncio.TimeoutError:
+                evt = {"type": "ping"}
+            await ws.send_json(evt)
+            if evt.get("type") == "resync":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        events.unsubscribe(q)
