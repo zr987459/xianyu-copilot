@@ -2,894 +2,970 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F8FAFC">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="闲鱼管家">
+  <meta name="referrer" content="no-referrer">
   <title>闲鱼管家 Pro - Xianyu Copilot</title>
-  <!-- Tailwind CSS -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- 生产环境建议改为本地构建的 tailwind.css；版本已锁定，避免 @latest 供应链风险 -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
   <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            brand: '#2563EB',
-            'brand-light': '#EFF6FF',
-            'brand-dark': '#1D4ED8',
-            surface: '#F8FAFC',
-          }
-        }
-      }
-    }
+    tailwind.config = { theme: { extend: { colors: {
+      brand: '#2563EB', 'brand-light': '#EFF6FF', 'brand-dark': '#1D4ED8'
+    } } } };
   </script>
   <style>
+    :root {
+      --sat: env(safe-area-inset-top, 0px);
+      --sab: env(safe-area-inset-bottom, 0px);
+      --sal: env(safe-area-inset-left, 0px);
+      --sar: env(safe-area-inset-right, 0px);
+      --nav-h: 58px;
+    }
+    html, body { height: 100%; overscroll-behavior-y: none; }
     body {
-      background-color: #F1F5F9;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
+      background: #F1F5F9; -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none; user-select: none; -webkit-font-smoothing: antialiased;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Helvetica Neue", sans-serif;
     }
+    input, textarea, .selectable { -webkit-user-select: text; user-select: text; }
     .no-scrollbar::-webkit-scrollbar { display: none; }
-    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-    .safe-top { padding-top: max(12px, env(safe-area-inset-top)); }
-    .safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
-    .backdrop-blur-nav {
-      background-color: rgba(255, 255, 255, 0.85);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+    .no-scrollbar { scrollbar-width: none; }
+
+    /* ---------- 沉浸式顶部：内容延伸到状态栏下，毛玻璃 ---------- */
+    .glass-top {
+      padding-top: calc(var(--sat) + 10px);
+      padding-left: calc(var(--sal) + 16px); padding-right: calc(var(--sar) + 16px);
+      background: rgba(248, 250, 252, .72);
+      -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: .5px solid rgba(15, 23, 42, .08);
     }
+    /* ---------- 毛玻璃底栏 + 安全区 ---------- */
+    .glass-nav {
+      padding-bottom: var(--sab);
+      padding-left: var(--sal); padding-right: var(--sar);
+      background: rgba(255, 255, 255, .72);
+      -webkit-backdrop-filter: saturate(180%) blur(24px); backdrop-filter: saturate(180%) blur(24px);
+      border-top: .5px solid rgba(15, 23, 42, .08);
+      box-shadow: 0 -8px 24px -12px rgba(15, 23, 42, .12);
+    }
+    @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+      .glass-top, .glass-nav { background: rgba(255,255,255,.97); }
+    }
+    .main-pad { padding-bottom: calc(var(--nav-h) + var(--sab) + 24px); }
+
+    .nav-btn .pill { transition: transform .25s cubic-bezier(.2,.8,.2,1), background .2s; }
+    .nav-btn.active { color: #2563EB; }
+    .nav-btn.active .pill { background: rgba(37,99,235,.10); transform: scale(1); }
+    .nav-btn:not(.active) .pill { transform: scale(.6); background: transparent; }
+    .badge-dot { min-width: 16px; height: 16px; font-size: 10px; line-height: 16px; }
+
+    /* ---------- 原生级按压反馈 ---------- */
+    .pressable { transition: transform .12s ease, background-color .15s ease, opacity .15s; }
+    .pressable:active { transform: scale(.97); }
+
+    /* ---------- 左滑操作行 ---------- */
+    .swipe-wrap { position: relative; overflow: hidden; border-radius: 14px; }
+    .swipe-actions { position: absolute; inset: 0 0 0 auto; display: flex; }
+    .swipe-actions button { width: 72px; color: #fff; font-size: 12px; font-weight: 600; }
+    .swipe-front { position: relative; z-index: 1; touch-action: pan-y; will-change: transform; }
+    .swipe-front.anim { transition: transform .28s cubic-bezier(.2,.8,.2,1); }
+
+    /* ---------- 底部抽屉 ---------- */
+    .sheet-mask { background: rgba(15,23,42,.38); opacity: 0; transition: opacity .25s; }
+    .sheet-mask.show { opacity: 1; }
+    .sheet { transform: translateY(100%); transition: transform .32s cubic-bezier(.2,.8,.2,1); will-change: transform; }
+    .sheet.show { transform: translateY(0); }
+    .sheet.dragging { transition: none; }
+    .sheet-pad-bottom { padding-bottom: calc(var(--sab) + 10px); }
+
+    /* ---------- 骨架屏 ---------- */
+    .skeleton { background: linear-gradient(90deg,#E2E8F0 25%,#F1F5F9 37%,#E2E8F0 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; border-radius: 8px; }
+    @keyframes sk { 0%{background-position:100% 50%} 100%{background-position:0 50%} }
+
+    /* ---------- Toast ---------- */
+    #toast { top: calc(var(--sat) + 64px); }
+    .toast-item { animation: tin .25s ease; }
+    @keyframes tin { from { opacity: 0; transform: translateY(-8px) scale(.98); } }
+
+    /* ---------- 下拉刷新 ---------- */
+    #ptr { height: 0; overflow: hidden; transition: height .2s; }
+
+    .bubble-me { background: #2563EB; color: #fff; border-radius: 18px 18px 4px 18px; }
+    .bubble-them { background: #fff; color: #0F172A; border-radius: 18px 18px 18px 4px; border: .5px solid #E2E8F0; }
+    .msg-in { animation: min .22s ease; }
+    @keyframes min { from { opacity: 0; transform: translateY(6px); } }
+
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
   </style>
 </head>
-<body class="flex flex-col h-screen overflow-hidden text-slate-800">
+<body class="flex flex-col h-full overflow-hidden text-slate-800">
 
-  <!-- 顶部沉浸式导航栏 -->
-  <header class="backdrop-blur-nav border-b border-slate-200/80 px-4 py-3 flex items-center justify-between z-20 shrink-0 safe-top sticky top-0">
-    <div class="flex items-center space-x-2.5">
-      <div class="w-8 h-8 rounded-xl bg-gradient-to-tr from-brand to-blue-400 flex items-center justify-center text-white shadow-sm shadow-blue-200">
-        <i data-lucide="bot" class="w-4 h-4"></i>
+  <!-- 顶部沉浸式导航 -->
+  <header class="glass-top fixed top-0 inset-x-0 z-30 pb-2.5 flex items-center justify-between">
+    <div class="flex items-center gap-2.5 min-w-0">
+      <div class="w-9 h-9 rounded-2xl bg-gradient-to-br from-brand to-brand-dark flex items-center justify-center text-white shadow-md shadow-blue-500/25">
+        <i data-lucide="bot" class="w-5 h-5"></i>
       </div>
-      <div>
-        <h1 class="font-bold text-sm text-slate-900 leading-tight">Xianyu Copilot</h1>
-        <div class="flex items-center space-x-1.5 text-[10px] text-emerald-600 font-medium">
-          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span id="conn-status">AI 7×24h 协同值守中</span>
+      <div class="min-w-0">
+        <h1 id="page-title" class="font-bold text-[15px] text-slate-900 leading-tight">消息</h1>
+        <div class="flex items-center gap-1.5 text-[11px] font-medium" id="conn-pill">
+          <span id="conn-dot" class="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
+          <span id="conn-text" class="text-slate-400">连接中…</span>
         </div>
       </div>
     </div>
-    <div class="flex items-center space-x-2">
-      <button onclick="refreshCurrentTab()" class="p-1.5 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100/80 transition active:scale-95">
-        <i data-lucide="rotate-cw" class="w-4 h-4"></i>
-      </button>
-      <button onclick="switchTab('settings')" class="p-1.5 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100/80 transition active:scale-95">
-        <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
-      </button>
-    </div>
+    <button id="btn-refresh" class="pressable p-2 text-slate-500 rounded-xl active:bg-slate-200/60" aria-label="刷新">
+      <i data-lucide="rotate-cw" class="w-[18px] h-[18px]"></i>
+    </button>
   </header>
 
-  <!-- 主体滚动区域 -->
-  <main class="flex-1 overflow-y-auto no-scrollbar relative bg-slate-50" id="main-scroll">
-    
-    <!-- ==================== TAB 1: 消息 (Messages) ==================== -->
-    <div id="tab-messages" class="tab-pane block p-4 space-y-3 pb-24">
+  <main id="main-scroll" class="flex-1 overflow-y-auto no-scrollbar relative">
+    <div id="header-spacer"></div>
+    <div id="ptr" class="flex items-end justify-center text-[11px] text-slate-400"><span class="pb-2" id="ptr-text">下拉刷新</span></div>
+
+    <!-- TAB 1: 消息 -->
+    <section id="tab-messages" class="tab-pane px-4 pt-3 space-y-3 main-pad">
       <div class="relative">
-        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-400"></i>
-        <input type="text" id="chat-search" oninput="filterChats()" placeholder="搜索买家昵称、消息内容或商品ID..." 
-          class="w-full pl-9 pr-4 py-2 bg-white rounded-xl text-xs border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand shadow-xs">
+        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+        <input type="search" id="chat-search" placeholder="搜索买家、消息或商品" autocomplete="off" enterkeyhint="search"
+          class="w-full pl-9 pr-4 py-2.5 bg-white/90 rounded-2xl text-[13px] border border-slate-200/80 focus:outline-none focus:ring-2 focus:ring-brand/40">
+      </div>
+      <div id="chat-list" class="space-y-2"></div>
+    </section>
+
+    <!-- TAB 2: 订单 -->
+    <section id="tab-orders" class="tab-pane hidden px-4 pt-3 space-y-3 main-pad">
+      <div class="flex bg-slate-200/70 p-1 rounded-2xl text-[12px] font-medium text-slate-600" id="order-seg">
+        <button data-status="all" class="seg flex-1 py-1.5 rounded-xl">全部</button>
+        <button data-status="pending" class="seg flex-1 py-1.5 rounded-xl">待发货 <span id="pending-badge" class="hidden ml-0.5 px-1.5 rounded-full bg-rose-500 text-white text-[10px]"></span></button>
+        <button data-status="sent" class="seg flex-1 py-1.5 rounded-xl">已发货</button>
+      </div>
+      <p class="text-[11px] text-slate-400 px-1">左滑订单可复制单号、查看发货内容</p>
+      <div id="order-list" class="space-y-2.5"></div>
+    </section>
+
+    <!-- TAB 3: 商品发货 -->
+    <section id="tab-products" class="tab-pane hidden px-4 pt-3 space-y-3 main-pad">
+      <div class="flex bg-slate-200/70 p-1 rounded-2xl text-[12px] font-medium text-slate-600" id="product-seg">
+        <button data-sub="cards" class="seg flex-1 py-1.5 rounded-xl">卡密池</button>
+        <button data-sub="rules" class="seg flex-1 py-1.5 rounded-xl">发货规则</button>
+        <button data-sub="publish" class="seg flex-1 py-1.5 rounded-xl">上架</button>
       </div>
 
-      <div id="chat-list-container" class="space-y-2">
-        <div class="text-center py-12 text-slate-400 text-xs flex flex-col items-center">
-          <i data-lucide="message-square" class="w-8 h-8 mb-2 opacity-40"></i>
-          正在同步买家会话流...
-        </div>
-      </div>
-    </div>
-
-    <!-- ==================== TAB 2: 订单 (Orders) ==================== -->
-    <div id="tab-orders" class="tab-pane hidden p-4 space-y-3 pb-24">
-      <div class="flex bg-slate-200/80 p-1 rounded-xl text-xs font-medium text-slate-600">
-        <button onclick="filterOrderTab('all')" id="btn-ord-all" class="flex-1 py-1.5 rounded-lg bg-white text-slate-900 shadow-sm transition">全部</button>
-        <button onclick="filterOrderTab('wait_send')" id="btn-ord-wait_send" class="flex-1 py-1.5 rounded-lg transition">待发货</button>
-        <button onclick="filterOrderTab('delivered')" id="btn-ord-delivered" class="flex-1 py-1.5 rounded-lg transition">已发货</button>
-      </div>
-
-      <div id="orders-list-container" class="space-y-2.5">
-        <div class="text-center py-12 text-slate-400 text-xs flex flex-col items-center">
-          <i data-lucide="package" class="w-8 h-8 mb-2 opacity-40"></i>
-          暂无订单流水
-        </div>
-      </div>
-    </div>
-
-    <!-- ==================== TAB 3: 商品与发货 (Products & Delivery) ==================== -->
-    <div id="tab-products" class="tab-pane hidden p-4 space-y-3 pb-24">
-      <!-- 三段式顶部切换 -->
-      <div class="flex border-b border-slate-200 bg-white -mx-4 -mt-4 px-4 pt-2 shadow-xs">
-        <button onclick="switchSubTab('cards')" id="subtab-cards" class="flex-1 py-2.5 text-xs font-semibold text-brand border-b-2 border-brand transition">🎫 卡密资产池</button>
-        <button onclick="switchSubTab('delivery_rules')" id="subtab-delivery_rules" class="flex-1 py-2.5 text-xs font-semibold text-slate-500 border-b-2 border-transparent transition">⚡ 复合发货规则</button>
-        <button onclick="switchSubTab('publish_items')" id="subtab-publish_items" class="flex-1 py-2.5 text-xs font-semibold text-slate-500 border-b-2 border-transparent transition">🚀 免浏览器上架</button>
-      </div>
-
-      <!-- 子分栏 1: 卡密资产池 -->
-      <div id="subpane-cards" class="space-y-3">
+      <!-- 卡密池 -->
+      <div id="sub-cards" class="subpane space-y-3">
         <div class="grid grid-cols-2 gap-2">
-          <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
-            <span class="text-[11px] text-slate-400 block font-medium">在库可用卡密</span>
-            <span class="text-xl font-bold text-emerald-600" id="card-stock-val">0</span>
+          <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80">
+            <span class="text-[11px] text-slate-400 block">在库可用</span>
+            <span class="text-xl font-bold text-emerald-600 tabular-nums" id="card-stock-val">–</span>
           </div>
-          <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-xs">
-            <span class="text-[11px] text-slate-400 block font-medium">累计已核销发货</span>
-            <span class="text-xl font-bold text-slate-600" id="card-used-val">0</span>
+          <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80">
+            <span class="text-[11px] text-slate-400 block">累计已发</span>
+            <span class="text-xl font-bold text-slate-700 tabular-nums" id="card-used-val">–</span>
           </div>
         </div>
-
-        <!-- 录入卡片 -->
-        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
+        <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2.5">
           <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-slate-900">录入新卡密</span>
-            <div class="flex text-[11px] bg-slate-100 p-0.5 rounded-lg">
-              <button onclick="setCardEntryMode('single')" id="btn-card-mode-single" class="px-2 py-0.5 rounded bg-white font-medium text-slate-800 shadow-xs">单码录入</button>
-              <button onclick="setCardEntryMode('batch')" id="btn-card-mode-batch" class="px-2 py-0.5 rounded text-slate-500 font-medium">批量导入</button>
+            <span class="text-[13px] font-bold text-slate-900">录入卡密</span>
+            <div class="flex text-[11px] bg-slate-100 p-0.5 rounded-lg" id="card-mode-seg">
+              <button data-mode="single" class="seg px-2.5 py-1 rounded-md">单条</button>
+              <button data-mode="batch" class="seg px-2.5 py-1 rounded-md">批量</button>
             </div>
           </div>
-          <input type="text" id="card-input-keyword" placeholder="所属商品关键词 (如: 激活码 / 月卡 / 百度网盘)" 
-            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
-          
-          <div id="card-mode-single-box">
-            <input type="text" id="card-input-single" placeholder="输入单条卡密 (如: ABCD-1234-EFGH-5678)" 
-              class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
-            <button onclick="submitSingleCard()" class="w-full mt-2 py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition shadow-sm">➕ 保存单个卡密</button>
+          <input type="text" id="card-kw" maxlength="64" placeholder="商品关键词（如：月卡 / 激活码）"
+            class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30">
+          <div id="card-single-box">
+            <input type="text" id="card-single" maxlength="2000" placeholder="单条卡密" autocomplete="off"
+              class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 font-mono focus:outline-none focus:ring-2 focus:ring-brand/30">
           </div>
-
-          <div id="card-mode-batch-box" class="hidden">
-            <textarea id="card-input-batch" placeholder="一行一个卡密：&#10;AAAA-1111-2222&#10;BBBB-3333-4444" 
-              class="w-full h-20 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand font-mono"></textarea>
-            <button onclick="submitBatchCards()" class="w-full mt-2 py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition shadow-sm">📥 批量导入库存</button>
+          <div id="card-batch-box" class="hidden">
+            <textarea id="card-batch" rows="4" placeholder="一行一个卡密，重复的会自动跳过"
+              class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 font-mono focus:outline-none focus:ring-2 focus:ring-brand/30"></textarea>
           </div>
+          <button id="btn-card-save" class="pressable w-full py-2.5 bg-brand text-white text-[13px] font-semibold rounded-xl active:bg-brand-dark">保存入库</button>
         </div>
-
-        <!-- 卡密列表与过滤 -->
-        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
+        <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
           <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-slate-900">卡密库存明细</span>
-            <div class="flex space-x-1 text-[11px]">
-              <button onclick="filterCardTable('all')" id="ftab-all" class="px-2 py-0.5 rounded-md bg-slate-200 text-slate-800 font-medium">全部</button>
-              <button onclick="filterCardTable('unused')" id="ftab-unused" class="px-2 py-0.5 rounded-md text-slate-500 font-medium">在库</button>
-              <button onclick="filterCardTable('used')" id="ftab-used" class="px-2 py-0.5 rounded-md text-slate-500 font-medium">已发</button>
+            <span class="text-[13px] font-bold text-slate-900">库存明细</span>
+            <div class="flex gap-1 text-[11px]" id="card-filter-seg">
+              <button data-f="all" class="seg px-2 py-0.5 rounded-md">全部</button>
+              <button data-f="unused" class="seg px-2 py-0.5 rounded-md">在库</button>
+              <button data-f="used" class="seg px-2 py-0.5 rounded-md">已发</button>
             </div>
           </div>
-          <div id="card-table-list" class="space-y-1.5 max-h-72 overflow-y-auto no-scrollbar"></div>
+          <p class="text-[11px] text-slate-400">卡密默认脱敏，点按查看明文；左滑复制或删除</p>
+          <div id="card-list" class="space-y-1.5"></div>
         </div>
       </div>
 
-      <!-- 子分栏 2: 复合发货规则 -->
-      <div id="subpane-delivery_rules" class="hidden space-y-3">
-        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
-          <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-slate-900">添加复合发货规则</span>
-            <span class="text-[11px] text-brand font-medium">支持网盘+独享卡密双发</span>
-          </div>
-          <input type="text" id="rule-kw" placeholder="匹配标题关键词 (* 为通用全部)" 
-            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
-          
-          <div class="flex items-center space-x-2 p-2 bg-slate-50 rounded-lg border border-slate-100">
-            <input type="checkbox" id="rule-use-pool" class="w-4 h-4 text-brand rounded border-slate-300 focus:ring-brand" checked>
-            <label for="rule-use-pool" class="text-xs text-slate-700 font-medium cursor-pointer">🎫 关联卡密池（每单自动抽取 1 张未发卡密）</label>
-          </div>
-
-          <textarea id="rule-fixed-text" placeholder="固定下发说明或网盘地址 (可选)：&#10;网盘链接: https://pan.baidu.com/... 提取码: 1234" 
-            class="w-full h-16 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand"></textarea>
-          
-          <button onclick="submitDeliveryRule()" class="w-full py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition shadow-sm">➕ 保存规则</button>
+      <!-- 发货规则 -->
+      <div id="sub-rules" class="subpane hidden space-y-3">
+        <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2.5">
+          <span class="text-[13px] font-bold text-slate-900 block">添加自动发货规则</span>
+          <input type="text" id="rule-kw" maxlength="64" placeholder="匹配标题关键词（* 为全部）"
+            class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30">
+          <label class="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-100">
+            <span class="text-[12px] text-slate-700 font-medium">关联卡密池（每单独享 1 张）</span>
+            <input type="checkbox" id="rule-pool" class="w-5 h-5 accent-blue-600" checked>
+          </label>
+          <textarea id="rule-fixed" rows="3" maxlength="4000" placeholder="固定下发内容（可选，如网盘链接/教程）"
+            class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30"></textarea>
+          <button id="btn-rule-save" class="pressable w-full py-2.5 bg-brand text-white text-[13px] font-semibold rounded-xl active:bg-brand-dark">保存规则</button>
         </div>
-
-        <div id="rules-card-list" class="space-y-2"></div>
+        <div id="rule-list" class="space-y-2"></div>
       </div>
 
-      <!-- 子分栏 3: 免浏览器一键上架发布 -->
-      <div id="subpane-publish_items" class="hidden space-y-3">
-        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
-          <span class="text-xs font-bold text-slate-900 block">发布新宝贝到闲鱼店铺</span>
-          <input type="text" id="pub-item-title" placeholder="商品标题 *" 
-            class="w-full px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
-          <div class="flex space-x-2">
-            <input type="number" id="pub-item-price" placeholder="售价 (元) *" step="0.1" 
-              class="w-1/2 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
-            <input type="number" id="pub-item-orig" placeholder="原价 (元)" step="0.1" 
-              class="w-1/2 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand">
+      <!-- 上架 -->
+      <div id="sub-publish" class="subpane hidden space-y-3">
+        <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2.5">
+          <span class="text-[13px] font-bold text-slate-900 block">发布新商品</span>
+          <input type="text" id="pub-title" maxlength="60" placeholder="商品标题 *"
+            class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30">
+          <div class="flex gap-2">
+            <input type="number" inputmode="decimal" id="pub-price" placeholder="售价 *" step="0.01" min="0.01"
+              class="w-1/2 px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30">
+            <input type="number" inputmode="decimal" id="pub-orig" placeholder="划线原价" step="0.01" min="0.01"
+              class="w-1/2 px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30">
           </div>
-          <textarea id="pub-item-desc" placeholder="宝贝详细描述与成色说明..." 
-            class="w-full h-16 px-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-brand"></textarea>
-          <input type="file" id="pub-item-img" accept="image/*" class="text-xs text-slate-500">
-          <button onclick="submitPublishItem()" id="btn-publish-submit" class="w-full py-2 bg-brand text-white text-xs font-semibold rounded-lg active:bg-brand-dark transition shadow-sm">🚀 立即调用官方接口发布</button>
+          <textarea id="pub-desc" rows="3" maxlength="5000" placeholder="宝贝描述 *"
+            class="w-full px-3 py-2 text-[13px] bg-slate-50 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand/30"></textarea>
+          <label class="pressable flex items-center gap-3 p-2.5 bg-slate-50 rounded-xl border border-dashed border-slate-300 cursor-pointer">
+            <img id="pub-preview" class="hidden w-12 h-12 rounded-lg object-cover" alt="">
+            <span id="pub-img-label" class="text-[12px] text-slate-500 flex items-center gap-1.5"><i data-lucide="image-plus" class="w-4 h-4"></i>添加主图（≤5MB）</span>
+            <input type="file" id="pub-img" accept="image/jpeg,image/png,image/webp" class="hidden">
+          </label>
+          <button id="btn-publish" class="pressable w-full py-2.5 bg-brand text-white text-[13px] font-semibold rounded-xl active:bg-brand-dark disabled:opacity-60">立即发布</button>
         </div>
-
-        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
-          <span class="text-xs font-bold text-slate-900 block">已发布宝贝列表</span>
-          <div id="published-items-list" class="space-y-2 max-h-60 overflow-y-auto no-scrollbar text-xs"></div>
+        <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+          <span class="text-[13px] font-bold text-slate-900 block">已发布</span>
+          <div id="pub-list" class="space-y-1.5"></div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- ==================== TAB 4: 我的与设置 (Mine & Settings) ==================== -->
-    <div id="tab-settings" class="tab-pane hidden p-4 space-y-3 pb-24">
-      <!-- 账号卡片 -->
-      <div class="bg-gradient-to-r from-brand to-brand-dark p-4 rounded-2xl text-white shadow-md relative overflow-hidden">
-        <div class="relative z-10 flex items-center space-x-3">
-          <div class="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center font-bold text-xl">
-            🐟
-          </div>
+    <!-- TAB 4: 我的 -->
+    <section id="tab-settings" class="tab-pane hidden px-4 pt-3 space-y-3 main-pad">
+      <div class="bg-gradient-to-br from-brand to-brand-dark p-4 rounded-3xl text-white shadow-lg shadow-blue-600/20 relative overflow-hidden">
+        <div class="absolute -right-6 -top-6 w-28 h-28 rounded-full bg-white/10"></div>
+        <div class="relative flex items-center gap-3">
+          <div class="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center text-2xl">🐟</div>
           <div>
-            <h2 class="font-bold text-base">闲鱼智能管家</h2>
-            <p class="text-xs text-blue-100 mt-0.5">Cookie 保鲜中 • 多专家阶梯砍价在线</p>
+            <h2 class="font-bold text-base">闲鱼店主</h2>
+            <p class="text-[12px] text-blue-100">AI 值守中 · 数据自动同步</p>
           </div>
         </div>
       </div>
-
-      <!-- 4 大指标卡片 -->
-      <div class="grid grid-cols-4 gap-2">
-        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">总咨询</span>
-          <span class="text-sm font-bold text-slate-900" id="stat-chats">0</span>
-        </div>
-        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">在售宝贝</span>
-          <span class="text-sm font-bold text-slate-900" id="stat-items-count">0</span>
-        </div>
-        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">可用卡密</span>
-          <span class="text-sm font-bold text-emerald-600" id="stat-cards-count">0</span>
-        </div>
-        <div class="bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-xs">
-          <span class="text-[10px] text-slate-400 block font-medium">自动发货</span>
-          <span class="text-sm font-bold text-blue-600" id="stat-delivery-count">0</span>
-        </div>
+      <div class="grid grid-cols-4 gap-2" id="stat-grid">
+        <button data-jump="messages" class="pressable bg-white p-2.5 rounded-2xl border border-slate-200/80 text-center">
+          <span class="text-[10px] text-slate-400 block">总咨询</span>
+          <span class="text-[15px] font-bold text-slate-900 tabular-nums" id="stat-chats">–</span>
+        </button>
+        <button data-jump="products:publish" class="pressable bg-white p-2.5 rounded-2xl border border-slate-200/80 text-center">
+          <span class="text-[10px] text-slate-400 block">在售</span>
+          <span class="text-[15px] font-bold text-slate-900 tabular-nums" id="stat-items">–</span>
+        </button>
+        <button data-jump="products:cards" class="pressable bg-white p-2.5 rounded-2xl border border-slate-200/80 text-center">
+          <span class="text-[10px] text-slate-400 block">在库卡密</span>
+          <span class="text-[15px] font-bold text-emerald-600 tabular-nums" id="stat-cards">–</span>
+        </button>
+        <button data-jump="orders" class="pressable bg-white p-2.5 rounded-2xl border border-slate-200/80 text-center">
+          <span class="text-[10px] text-slate-400 block">已发货</span>
+          <span class="text-[15px] font-bold text-brand tabular-nums" id="stat-delivered">–</span>
+        </button>
       </div>
-
-      <!-- AI Prompt 在线调整 -->
-      <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
-        <span class="text-xs font-bold text-slate-900 flex items-center justify-between">
-          <span>AI 阶梯砍价专家 Prompt</span>
-          <button onclick="saveSettingsPrompts()" class="text-[11px] text-brand font-semibold hover:underline">💾 保存生效</button>
-        </span>
-        <textarea id="setting-prompt-price" class="w-full h-20 p-2 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:ring-1 focus:ring-brand"></textarea>
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-[13px] font-bold text-slate-900">AI 阶梯砍价 Prompt</span>
+          <button data-save-prompt class="pressable text-[12px] text-brand font-semibold">保存</button>
+        </div>
+        <textarea id="prompt-price" rows="5" class="w-full p-2.5 text-[12px] bg-slate-50 rounded-xl border border-slate-200"></textarea>
       </div>
-
-      <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
-        <span class="text-xs font-bold text-slate-900 flex items-center justify-between">
-          <span>日常客服与答疑 Prompt</span>
-          <button onclick="saveSettingsPrompts()" class="text-[11px] text-brand font-semibold hover:underline">💾 保存生效</button>
-        </span>
-        <textarea id="setting-prompt-default" class="w-full h-20 p-2 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:ring-1 focus:ring-brand"></textarea>
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-[13px] font-bold text-slate-900">日常客服 Prompt</span>
+          <button data-save-prompt class="pressable text-[12px] text-brand font-semibold">保存</button>
+        </div>
+        <textarea id="prompt-default" rows="5" class="w-full p-2.5 text-[12px] bg-slate-50 rounded-xl border border-slate-200"></textarea>
       </div>
-
-      <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2">
-        <span class="text-xs font-bold text-slate-900 block">系统配置信息</span>
-        <pre id="sys-env-pre" class="text-[10px] bg-slate-900 text-emerald-400 p-2.5 rounded-lg overflow-x-auto font-mono"></pre>
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200/80 space-y-2">
+        <span class="text-[13px] font-bold text-slate-900 block">网关配置</span>
+        <pre id="sys-env" class="selectable text-[11px] bg-slate-900 text-emerald-400 p-2.5 rounded-xl overflow-x-auto"></pre>
       </div>
-    </div>
+      <button id="btn-logout" class="pressable w-full py-2.5 bg-white text-rose-500 text-[13px] font-semibold rounded-2xl border border-slate-200/80">退出登录（清除本机 Token）</button>
+    </section>
   </main>
 
-  <!-- 底部固定毛玻璃 4 大导航 Tab -->
-  <nav class="backdrop-blur-nav border-t border-slate-200/80 fixed bottom-0 left-0 right-0 z-30 safe-bottom">
-    <div class="flex justify-around items-center h-14">
-      <button onclick="switchTab('messages')" id="nav-messages" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-brand transition active:scale-90">
-        <i data-lucide="message-circle" class="w-5 h-5 mb-0.5"></i>
+  <!-- 毛玻璃底栏 -->
+  <nav class="glass-nav fixed bottom-0 inset-x-0 z-30">
+    <div class="flex justify-around items-stretch" style="height: var(--nav-h)">
+      <button data-tab="messages" class="nav-btn pressable flex-1 flex flex-col items-center justify-center gap-0.5 text-slate-400 relative">
+        <span class="pill px-4 py-1 rounded-full"><i data-lucide="message-circle" class="w-[22px] h-[22px]"></i></span>
         <span class="text-[10px] font-semibold">消息</span>
       </button>
-      <button onclick="switchTab('orders')" id="nav-orders" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
-        <i data-lucide="clipboard-list" class="w-5 h-5 mb-0.5"></i>
-        <span class="text-[10px] font-medium">订单</span>
+      <button data-tab="orders" class="nav-btn pressable flex-1 flex flex-col items-center justify-center gap-0.5 text-slate-400 relative">
+        <span class="pill px-4 py-1 rounded-full relative"><i data-lucide="clipboard-list" class="w-[22px] h-[22px]"></i>
+          <span id="nav-order-badge" class="badge-dot hidden absolute -top-0.5 right-1.5 px-1 rounded-full bg-rose-500 text-white text-center"></span></span>
+        <span class="text-[10px] font-semibold">订单</span>
       </button>
-      <button onclick="switchTab('products')" id="nav-products" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
-        <i data-lucide="tag" class="w-5 h-5 mb-0.5"></i>
-        <span class="text-[10px] font-medium">商品发货</span>
+      <button data-tab="products" class="nav-btn pressable flex-1 flex flex-col items-center justify-center gap-0.5 text-slate-400 relative">
+        <span class="pill px-4 py-1 rounded-full"><i data-lucide="tag" class="w-[22px] h-[22px]"></i></span>
+        <span class="text-[10px] font-semibold">商品</span>
       </button>
-      <button onclick="switchTab('settings')" id="nav-settings" class="nav-btn flex flex-col items-center justify-center flex-1 h-full text-slate-400 transition active:scale-90">
-        <i data-lucide="user" class="w-5 h-5 mb-0.5"></i>
-        <span class="text-[10px] font-medium">我的设置</span>
+      <button data-tab="settings" class="nav-btn pressable flex-1 flex flex-col items-center justify-center gap-0.5 text-slate-400 relative">
+        <span class="pill px-4 py-1 rounded-full"><i data-lucide="user" class="w-[22px] h-[22px]"></i></span>
+        <span class="text-[10px] font-semibold">我的</span>
       </button>
     </div>
   </nav>
 
-  <!-- 聊天详情抽屉 (带在谈宝贝悬浮卡片) -->
-  <div id="chat-modal" class="fixed inset-0 bg-black/40 z-50 hidden flex flex-col justify-end backdrop-blur-xs">
-    <div class="bg-white rounded-t-2xl max-h-[88vh] h-[88vh] flex flex-col overflow-hidden shadow-2xl">
-      <!-- 抽屉头部 -->
-      <div class="p-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-        <div class="flex items-center space-x-2">
-          <div class="w-7 h-7 rounded-full bg-brand text-white flex items-center justify-center text-xs font-bold">👤</div>
-          <div>
-            <span class="text-xs font-bold text-slate-900 block" id="modal-buyer-title">买家对话</span>
-            <span class="text-[10px] text-slate-400" id="modal-buyer-sub">消息列表</span>
+  <!-- 买家对话抽屉 -->
+  <div id="chat-sheet-root" class="fixed inset-0 z-50 hidden">
+    <div class="sheet-mask absolute inset-0" data-close-sheet></div>
+    <div id="chat-sheet" class="sheet absolute inset-x-0 bottom-0 h-[90vh] bg-slate-100 rounded-t-3xl flex flex-col overflow-hidden shadow-2xl">
+      <div id="chat-sheet-handle" class="shrink-0 bg-white/85 backdrop-blur-xl" style="touch-action:none">
+        <div class="w-10 h-1.5 bg-slate-300 rounded-full mx-auto mt-2"></div>
+        <div class="px-4 pt-2 pb-2.5 flex items-center justify-between">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div id="chat-avatar" class="w-9 h-9 rounded-full bg-brand-light text-brand flex items-center justify-center text-[12px] font-bold"></div>
+            <div class="min-w-0">
+              <div id="chat-title" class="text-[14px] font-bold text-slate-900 truncate"></div>
+              <div id="chat-sub" class="text-[11px] text-slate-400 truncate"></div>
+            </div>
           </div>
+          <button data-close-sheet class="pressable p-1.5 text-slate-400 rounded-full bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
         </div>
-        <button onclick="closeChatModal()" class="p-1 text-slate-400 hover:text-slate-700">
-          <i data-lucide="x" class="w-5 h-5"></i>
-        </button>
       </div>
-
-      <!-- 悬浮在谈宝贝卡片 (参考 xianyu-mobile) -->
-      <div class="bg-blue-50/70 border-b border-blue-100 p-2.5 px-3.5 flex items-center justify-between shrink-0">
-        <div class="flex items-center space-x-2.5 min-w-0">
-          <div class="w-8 h-8 rounded-lg bg-blue-200/60 flex items-center justify-center text-brand text-xs font-bold shrink-0">
-            📦
-          </div>
-          <div class="min-w-0">
-            <span class="text-xs font-semibold text-slate-900 block truncate" id="modal-item-id">商品ID: -</span>
-            <span class="text-[10px] text-slate-500" id="modal-item-desc">当前会话专属咨询宝贝</span>
-          </div>
+      <!-- 在谈宝贝悬浮卡 + 议价状态条（sticky，随滚动悬浮） -->
+      <div id="chat-body" class="flex-1 overflow-y-auto no-scrollbar">
+        <div class="sticky top-0 z-10 px-3 pt-2 pb-1">
+          <div id="deal-card" class="bg-white/80 backdrop-blur-xl rounded-2xl border border-white shadow-lg shadow-slate-900/5 p-3"></div>
         </div>
-        <span id="modal-bargain-badge" class="shrink-0 text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-semibold hidden">
-          砍价中
-        </span>
+        <div id="chat-msgs" class="px-3 pb-4 pt-1 space-y-2"></div>
       </div>
-
-      <!-- 对话流容器 (完全文本转义防 XSS) -->
-      <div class="flex-1 overflow-y-auto p-3 space-y-2.5 bg-slate-100/60 no-scrollbar" id="modal-chat-body"></div>
+      <div class="shrink-0 bg-white/85 backdrop-blur-xl border-t border-slate-200/70 px-4 pt-2 sheet-pad-bottom text-center text-[11px] text-slate-400" id="chat-foot">AI 自动接待中 · 新消息自动同步</div>
     </div>
   </div>
 
-  <script>
-    // Tab 切换逻辑
-    function switchTab(name) {
-      document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
-      document.getElementById('tab-' + name).classList.remove('hidden');
+  <!-- 通用 Action Sheet（替代 confirm/alert） -->
+  <div id="action-root" class="fixed inset-0 z-[60] hidden">
+    <div class="sheet-mask absolute inset-0" data-close-action></div>
+    <div id="action-sheet" class="sheet absolute inset-x-0 bottom-0 px-3 sheet-pad-bottom">
+      <div class="bg-white/90 backdrop-blur-xl rounded-2xl overflow-hidden mb-2">
+        <div id="action-title" class="px-4 py-3 text-center text-[12px] text-slate-500 border-b border-slate-200/70"></div>
+        <div id="action-buttons"></div>
+      </div>
+      <button data-close-action class="pressable w-full py-3.5 bg-white rounded-2xl text-[15px] font-semibold text-brand">取消</button>
+    </div>
+  </div>
 
-      document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.classList.remove('text-brand', 'font-semibold');
-        btn.classList.add('text-slate-400', 'font-medium');
-      });
-      const activeBtn = document.getElementById('nav-' + name);
-      activeBtn.classList.remove('text-slate-400', 'font-medium');
-      activeBtn.classList.add('text-brand', 'font-semibold');
+  <div id="toast" class="fixed inset-x-0 z-[70] flex flex-col items-center gap-2 pointer-events-none"></div>
 
-      if (name === 'messages') loadChats();
-      if (name === 'orders') loadOrders();
-      if (name === 'products') loadProductData();
-      if (name === 'settings') loadSettings();
-      lucide.createIcons();
-    }
+<script>
+'use strict';
+/* =====================================================================
+ * 0. 安全 DOM 构建：全文件不使用 innerHTML 拼接任何服务端/用户数据
+ *    所有文本一律走 textContent；事件用 addEventListener，不拼 onclick 字符串
+ * ===================================================================*/
+function h(tag, props, ...children) {
+  const el = document.createElement(tag);
+  if (props) for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = String(v);
+    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+    else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+    else el.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of children.flat()) {
+    if (c == null || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+const $ = id => document.getElementById(id);
+const icon = (name, cls = 'w-4 h-4') => h('i', { 'data-lucide': name, class: cls });
+const refreshIcons = () => window.lucide && lucide.createIcons();
+function safeUrl(u) {                 // 只放行 https 链接，挡掉 javascript: / data:
+  try { const x = new URL(u, location.href); return x.protocol === 'https:' ? x.href : null; } catch { return null; }
+}
+const tail = (s, n) => String(s ?? '').slice(-n);
+const haptic = (ms = 8) => { try { navigator.vibrate && navigator.vibrate(ms); } catch {} };
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(String(ts).replace(' ', 'T') + (String(ts).includes('Z') ? '' : 'Z'));
+  if (isNaN(d)) return String(ts).slice(5, 16);
+  const now = new Date(), same = d.toDateString() === now.toDateString();
+  const p = n => String(n).padStart(2, '0');
+  return same ? `${p(d.getHours())}:${p(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`;
+}
 
-    function switchSubTab(sub) {
-      ['cards', 'delivery_rules', 'publish_items'].forEach(s => {
-        document.getElementById('subpane-' + s).classList.toggle('hidden', s !== sub);
-        const tabBtn = document.getElementById('subtab-' + s);
-        tabBtn.classList.toggle('text-brand', s === sub);
-        tabBtn.classList.toggle('border-brand', s === sub);
-        tabBtn.classList.toggle('text-slate-500', s !== sub);
-        tabBtn.classList.toggle('border-transparent', s !== sub);
-      });
-      if (sub === 'cards') loadCardsStock();
-      if (sub === 'delivery_rules') loadDeliveryRules();
-      if (sub === 'publish_items') loadPublishedItems();
-      lucide.createIcons();
-    }
+/* =====================================================================
+ * 1. Toast / Action Sheet / 剪贴板
+ * ===================================================================*/
+function toast(msg, type = 'ok') {
+  const color = { ok: 'bg-slate-900/90', err: 'bg-rose-600/95', warn: 'bg-amber-500/95' }[type];
+  const t = h('div', { class: `toast-item ${color} text-white text-[13px] px-4 py-2 rounded-full shadow-lg backdrop-blur`, text: msg });
+  $('toast').append(t);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, 2200);
+}
+function openLayer(rootId, sheetId) {
+  const root = $(rootId); root.classList.remove('hidden');
+  requestAnimationFrame(() => { root.querySelector('.sheet-mask').classList.add('show'); $(sheetId).classList.add('show'); });
+}
+function closeLayer(rootId, sheetId) {
+  const root = $(rootId);
+  root.querySelector('.sheet-mask').classList.remove('show'); $(sheetId).classList.remove('show');
+  setTimeout(() => root.classList.add('hidden'), 300);
+}
+function actionSheet(title, actions) {
+  return new Promise(resolve => {
+    $('action-title').textContent = title;
+    const box = $('action-buttons'); box.replaceChildren();
+    actions.forEach((a, i) => box.append(h('button', {
+      class: `pressable w-full py-3.5 text-[15px] ${i ? 'border-t border-slate-200/70' : ''} ${a.danger ? 'text-rose-500 font-semibold' : 'text-brand'}`,
+      text: a.label, onclick: () => { haptic(); closeLayer('action-root', 'action-sheet'); resolve(a.value); }
+    })));
+    $('action-root').querySelectorAll('[data-close-action]').forEach(el =>
+      el.onclick = () => { closeLayer('action-root', 'action-sheet'); resolve(null); });
+    openLayer('action-root', 'action-sheet');
+  });
+}
+const confirmSheet = (title, label = '确认', danger = true) =>
+  actionSheet(title, [{ label, value: true, danger }]).then(Boolean);
+async function copyText(s) {
+  try { await navigator.clipboard.writeText(s); }
+  catch { const ta = h('textarea', { style: { position: 'fixed', opacity: '0' } }); ta.value = s; document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+  haptic(); toast('已复制');
+}
 
-    function refreshCurrentTab() {
-      loadStats();
-      const activeTab = document.querySelector('.tab-pane:not(.hidden)').id.replace('tab-', '');
-      switchTab(activeTab);
-    }
+/* =====================================================================
+ * 2. 网络层：鉴权 + 超时 + ETag 304 + 弱网自愈
+ * ===================================================================*/
+const etagCache = new Map();          // url -> {etag, data}
+let token = localStorage.getItem('xy_token') || '';
 
-    // 统计数据
-    async function loadStats() {
-      try {
-        const res = await fetch('/api/stats').then(r => r.json());
-        document.getElementById('stat-chats').innerText = res.total_msgs || 0;
-        document.getElementById('stat-items-count').innerText = res.total_items || 0;
-        document.getElementById('stat-cards-count').innerText = res.available_cards || 0;
-        document.getElementById('stat-delivery-count').innerText = res.total_delivered || 0;
-        document.getElementById('card-stock-val').innerText = res.available_cards || 0;
-        document.getElementById('card-used-val').innerText = res.used_cards || 0;
-      } catch (e) {}
-    }
+class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 
-    // 会话列表（完全防 XSS 构建 DOM）
-    let allChats = [];
-    async function loadChats() {
-      const box = document.getElementById('chat-list-container');
-      try {
-        const res = await fetch('/api/chats').then(r => r.json());
-        allChats = res.chats || [];
-        renderChatList(allChats);
-      } catch (e) {
-        box.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">拉取会话流失败</div>';
+async function api(path, { method = 'GET', body, timeout = 8000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  const headers = { 'Authorization': 'Bearer ' + token };
+  const cached = method === 'GET' ? etagCache.get(path) : null;
+  if (cached) headers['If-None-Match'] = cached.etag;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  try {
+    const r = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: ctrl.signal, cache: 'no-store' });
+    Net.ok();
+    if (r.status === 304 && cached) return cached.data;
+    if (r.status === 401) { askToken(); throw new HttpError(401, '需要登录'); }
+    let data = null; try { data = await r.json(); } catch {}
+    if (!r.ok) throw new HttpError(r.status, (data && data.detail) || `请求失败 (${r.status})`);
+    const tag = r.headers.get('ETag');
+    if (method === 'GET' && tag) etagCache.set(path, { etag: tag, data });
+    return data;
+  } catch (e) {
+    if (!(e instanceof HttpError)) Net.fail();      // 只有网络层错误才算断线
+    throw e;
+  } finally { clearTimeout(timer); }
+}
+
+/* 连接状态机：online → degraded → offline，带指数退避 + 抖动 */
+const Net = {
+  fails: 0, state: 'connecting',
+  ok() { if (this.state !== 'online') { this.fails = 0; this.set('online'); } this.fails = 0; },
+  fail() { this.fails++; this.set(navigator.onLine === false ? 'offline' : (this.fails >= 3 ? 'offline' : 'degraded')); },
+  set(s) {
+    if (this.state === s) return;
+    const prev = this.state; this.state = s;
+    const map = { online: ['bg-emerald-500', 'text-emerald-600', 'AI 值守中 · 已同步'],
+                  degraded: ['bg-amber-400 animate-pulse', 'text-amber-600', '网络不稳，重连中…'],
+                  offline: ['bg-rose-500', 'text-rose-600', '离线 · 显示缓存数据'],
+                  connecting: ['bg-slate-300', 'text-slate-400', '连接中…'] }[s];
+    $('conn-dot').className = 'w-1.5 h-1.5 rounded-full ' + map[0];
+    $('conn-text').className = map[1]; $('conn-text').textContent = map[2];
+    if (s === 'online' && (prev === 'offline' || prev === 'degraded')) { toast('已恢复连接'); Poller.kick(); }
+  },
+  backoff() { return Math.min(60000, 3000 * 2 ** Math.min(this.fails, 5)) * (0.8 + Math.random() * 0.4); }
+};
+
+/* 静默轮询：可见时 6s，后台暂停；失败指数退避；回到前台/网络恢复立即补拉；同一时刻只跑一轮 */
+const Poller = {
+  timer: null, running: false, BASE: 6000,
+  async tick() {
+    if (this.running || document.hidden || !token) return this.schedule();
+    this.running = true;
+    try { await Promise.allSettled([loadStats(true), refreshActive(true), ChatSheet.poll()]); }
+    finally { this.running = false; this.schedule(); }
+  },
+  schedule() {
+    clearTimeout(this.timer);
+    if (document.hidden) return;
+    this.timer = setTimeout(() => this.tick(), Net.fails ? Net.backoff() : this.BASE);
+  },
+  kick() { clearTimeout(this.timer); this.tick(); }
+};
+document.addEventListener('visibilitychange', () => { if (!document.hidden) Poller.kick(); });
+window.addEventListener('online', () => Poller.kick());
+window.addEventListener('offline', () => Net.set('offline'));
+window.addEventListener('pageshow', e => { if (e.persisted) Poller.kick(); });   // iOS bfcache 返回
+
+function askToken() {
+  if (askToken.open) return; askToken.open = true;
+  const t = prompt('请输入后台 ADMIN_TOKEN（服务端启动日志中可见）');
+  askToken.open = false;
+  if (t && t.trim()) { token = t.trim(); localStorage.setItem('xy_token', token); etagCache.clear(); Poller.kick(); }
+}
+
+/* =====================================================================
+ * 3. 通用组件：空态 / 骨架 / 左滑行 / 分段控件
+ * ===================================================================*/
+const empty = (ic, text) => h('div', { class: 'text-center py-14 text-slate-400 text-[12px] flex flex-col items-center gap-2' }, icon(ic, 'w-9 h-9 opacity-40'), text);
+const skeletons = n => Array.from({ length: n }, () => h('div', { class: 'bg-white p-3 rounded-2xl border border-slate-200/80 flex gap-3' },
+  h('div', { class: 'skeleton w-10 h-10 rounded-full' }), h('div', { class: 'flex-1 space-y-2 py-1' }, h('div', { class: 'skeleton h-3 w-1/3' }), h('div', { class: 'skeleton h-3 w-2/3' }))));
+
+let openSwipe = null;
+function swipeRow(front, actions) {
+  const ACTION_W = 72 * actions.length;
+  const wrap = h('div', { class: 'swipe-wrap' },
+    h('div', { class: 'swipe-actions' }, actions.map(a => h('button', { class: `${a.cls} pressable`, text: a.label,
+      onclick: e => { e.stopPropagation(); close(); haptic(); a.onclick(); } }))));
+  front.classList.add('swipe-front');
+  wrap.append(front);
+  let x0 = 0, y0 = 0, dx = 0, base = 0, dragging = false, decided = false;
+  const setX = x => front.style.transform = `translateX(${x}px)`;
+  function close() { front.classList.add('anim'); setX(0); base = 0; if (openSwipe === close) openSwipe = null; }
+  front.addEventListener('pointerdown', e => {
+    if (openSwipe && openSwipe !== close) openSwipe();
+    x0 = e.clientX; y0 = e.clientY; dx = 0; dragging = true; decided = false; front.classList.remove('anim');
+  });
+  front.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const mx = e.clientX - x0, my = e.clientY - y0;
+    if (!decided) { if (Math.abs(mx) < 6 && Math.abs(my) < 6) return; decided = true; if (Math.abs(my) > Math.abs(mx)) { dragging = false; return; } front.setPointerCapture(e.pointerId); }
+    dx = mx; setX(Math.max(-ACTION_W - 24, Math.min(0, base + dx)));
+  });
+  const end = () => {
+    if (!dragging) return; dragging = false; front.classList.add('anim');
+    const x = base + dx;
+    if (x < -ACTION_W / 2) { setX(-ACTION_W); base = -ACTION_W; openSwipe = close; haptic(6); } else close();
+  };
+  front.addEventListener('pointerup', end); front.addEventListener('pointercancel', end);
+  front.addEventListener('click', e => { if (Math.abs(dx) > 6 || base !== 0) { e.stopPropagation(); e.preventDefault(); if (base !== 0) close(); } }, true);
+  return wrap;
+}
+document.addEventListener('pointerdown', e => { if (openSwipe && !e.target.closest('.swipe-wrap')) openSwipe(); });
+
+function bindSeg(containerId, attr, onChange, initial) {
+  const btns = [...$(containerId).querySelectorAll('.seg')];
+  const set = v => btns.forEach(b => {
+    const on = b.dataset[attr] === v;
+    b.classList.toggle('bg-white', on); b.classList.toggle('text-slate-900', on); b.classList.toggle('shadow-sm', on);
+  });
+  btns.forEach(b => b.addEventListener('click', () => { haptic(); set(b.dataset[attr]); onChange(b.dataset[attr]); }));
+  set(initial);
+  return set;
+}
+
+/* =====================================================================
+ * 4. Tab 路由
+ * ===================================================================*/
+const TITLES = { messages: '消息', orders: '订单', products: '商品与发货', settings: '我的' };
+let activeTab = 'messages', activeSub = 'cards';
+function switchTab(name, sub) {
+  activeTab = name;
+  document.querySelectorAll('.tab-pane').forEach(el => el.classList.toggle('hidden', el.id !== 'tab-' + name));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  $('page-title').textContent = TITLES[name];
+  $('main-scroll').scrollTo({ top: 0 });
+  if (sub) setSub(sub);
+  refreshActive(false);
+}
+function refreshActive(silent) {
+  if (activeTab === 'messages') return loadChats(silent);
+  if (activeTab === 'orders') return loadOrders(silent);
+  if (activeTab === 'products') return ({ cards: loadCards, rules: loadRules, publish: loadPublished })[activeSub](silent);
+  if (activeTab === 'settings') return silent ? null : loadSettings();
+}
+document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => { haptic(); switchTab(b.dataset.tab); }));
+document.querySelectorAll('[data-jump]').forEach(b => b.addEventListener('click', () => { const [t, s] = b.dataset.jump.split(':'); switchTab(t, s); }));
+$('btn-refresh').addEventListener('click', async e => {
+  const ic = e.currentTarget.querySelector('svg'); ic && ic.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(360deg)' }], { duration: 600 });
+  haptic(); etagCache.clear(); await Promise.allSettled([loadStats(), refreshActive(false)]);
+});
+
+/* =====================================================================
+ * 5. 概览
+ * ===================================================================*/
+async function loadStats(silent) {
+  try {
+    const s = await api('/api/stats');
+    const set = (id, v) => { const el = $(id); if (el && el.textContent !== String(v)) el.textContent = v; };
+    set('stat-chats', s.total_msgs); set('stat-items', s.total_items); set('stat-cards', s.available_cards);
+    set('stat-delivered', s.total_delivered); set('card-stock-val', s.available_cards); set('card-used-val', s.used_cards);
+    const p = s.pending_delivery || 0;
+    for (const id of ['nav-order-badge', 'pending-badge']) { $(id).classList.toggle('hidden', !p); $(id).textContent = p > 99 ? '99+' : p; }
+  } catch (e) { if (!silent && !(e instanceof HttpError && e.status === 401)) toast(e.message, 'err'); }
+}
+
+/* =====================================================================
+ * 6. 消息列表
+ * ===================================================================*/
+let allChats = [], chatsLoaded = false;
+async function loadChats(silent) {
+  if (!chatsLoaded && !silent) $('chat-list').replaceChildren(...skeletons(4));
+  try { const r = await api('/api/chats'); allChats = r.chats || []; chatsLoaded = true; renderChats(); }
+  catch (e) { if (!chatsLoaded) $('chat-list').replaceChildren(empty('wifi-off', '拉取会话失败，网络恢复后自动重试')); }
+}
+function renderChats() {
+  const q = $('chat-search').value.trim().toLowerCase();
+  const list = q ? allChats.filter(c => [c.user_id, c.last_content, c.item_id, c.item_title].some(v => String(v || '').toLowerCase().includes(q))) : allChats;
+  if (!list.length) { $('chat-list').replaceChildren(empty('message-square', q ? '没有匹配的会话' : '暂无买家咨询，AI 正在监听中…')); return refreshIcons(); }
+  $('chat-list').replaceChildren(...list.map(c => h('div', {
+    class: 'pressable bg-white p-3 rounded-2xl border border-slate-200/80 flex items-center gap-3 cursor-pointer active:bg-slate-50',
+    onclick: () => ChatSheet.open(c)
+  },
+    h('div', { class: 'w-11 h-11 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 text-slate-600 flex items-center justify-center font-bold text-[12px] shrink-0', text: tail(c.user_id, 2) }),
+    h('div', { class: 'min-w-0 flex-1' },
+      h('div', { class: 'flex items-center gap-1.5' },
+        h('span', { class: 'font-bold text-[13px] text-slate-900 truncate', text: '买家 ' + tail(c.user_id, 6) }),
+        c.bargain_count > 0 ? h('span', { class: 'bg-rose-50 text-rose-600 text-[10px] px-1.5 py-0.5 rounded-md font-semibold shrink-0', text: `砍价 ${c.bargain_count} 轮` }) : null),
+      c.item_title ? h('div', { class: 'text-[11px] text-brand truncate', text: '📦 ' + c.item_title }) : null,
+      h('p', { class: 'text-[12px] text-slate-400 truncate mt-0.5', text: (c.last_role === 'assistant' ? '🤖 ' : '') + (c.last_content || '') })),
+    h('div', { class: 'text-right shrink-0 self-start pt-0.5' },
+      h('span', { class: 'text-[10px] text-slate-400 block', text: fmtTime(c.last_time) }),
+      h('span', { class: 'inline-block mt-1.5 bg-slate-100 text-slate-500 text-[10px] px-1.5 rounded-full font-semibold tabular-nums', text: c.msg_count })))));
+  refreshIcons();
+}
+let searchT; $('chat-search').addEventListener('input', () => { clearTimeout(searchT); searchT = setTimeout(renderChats, 120); });
+
+/* =====================================================================
+ * 7. 买家对话抽屉：在谈宝贝悬浮卡 + 议价状态条 + 增量同步 + 下拉关闭
+ * ===================================================================*/
+const STAGES = {
+  inquiry:    { label: '咨询中',   cls: 'bg-slate-100 text-slate-600', bar: 'bg-slate-300' },
+  bargaining: { label: '议价中',   cls: 'bg-amber-50 text-amber-700',  bar: 'bg-amber-400' },
+  floor:      { label: '已到底价', cls: 'bg-rose-50 text-rose-600',    bar: 'bg-rose-500' },
+  delivered:  { label: '已成交发货', cls: 'bg-emerald-50 text-emerald-700', bar: 'bg-emerald-500' },
+};
+const ChatSheet = {
+  cur: null, lastId: 0, gen: 0,
+  async open(c) {
+    haptic();
+    this.cur = c; this.lastId = 0; const gen = ++this.gen;
+    $('chat-avatar').textContent = tail(c.user_id, 2);
+    $('chat-title').textContent = '买家 ' + tail(c.user_id, 6);
+    $('chat-sub').textContent = '会话 ' + (c.chat_id ? tail(c.chat_id, 8) : '—');
+    $('deal-card').replaceChildren(h('div', { class: 'skeleton h-12 w-full' }));
+    $('chat-msgs').replaceChildren(h('div', { class: 'text-center py-10 text-[12px] text-slate-400', text: '加载聊天记录…' }));
+    openLayer('chat-sheet-root', 'chat-sheet');
+    history.pushState({ sheet: 1 }, '');      // Android 返回键 / iOS 侧滑返回关闭抽屉
+    await Promise.allSettled([this.loadContext(gen), this.loadMsgs(gen, true)]);
+  },
+  close(fromPop) {
+    if (!this.cur) return;
+    this.cur = null; this.gen++;
+    closeLayer('chat-sheet-root', 'chat-sheet');
+    if (!fromPop && history.state && history.state.sheet) history.back();
+  },
+  qs() { return `user_id=${encodeURIComponent(this.cur.user_id)}&item_id=${encodeURIComponent(this.cur.item_id)}`; },
+  async loadContext(gen) {
+    try {
+      const ctx = await api('/api/chat/context?' + this.qs());
+      if (gen !== this.gen) return;
+      this.renderDeal(ctx);
+    } catch { if (gen === this.gen) $('deal-card').replaceChildren(h('div', { class: 'text-[12px] text-slate-400', text: '商品信息暂不可用' })); }
+  },
+  renderDeal({ item, bargain, order }) {
+    const st = STAGES[bargain.stage] || STAGES.inquiry;
+    const pct = Math.min(100, Math.round((bargain.rounds / Math.max(1, bargain.max_rounds)) * 100));
+    const link = safeUrl(item.url);
+    const steps = Array.from({ length: bargain.max_rounds }, (_, i) =>
+      h('div', { class: `h-1.5 flex-1 rounded-full ${i < bargain.rounds ? st.bar : 'bg-slate-200'}` }));
+    $('deal-card').replaceChildren(
+      h('div', { class: 'flex items-center gap-3' },
+        h('div', { class: 'w-12 h-12 rounded-xl bg-gradient-to-br from-blue-50 to-blue-100 flex items-center justify-center text-brand shrink-0' }, icon('package', 'w-6 h-6')),
+        h('div', { class: 'min-w-0 flex-1' },
+          h('div', { class: 'flex items-center gap-1.5' },
+            h('span', { class: 'text-[10px] font-semibold text-brand bg-brand-light px-1.5 py-0.5 rounded shrink-0', text: '在谈宝贝' }),
+            h('span', { class: 'text-[13px] font-semibold text-slate-900 truncate', text: item.title || ('商品 ' + tail(item.item_id, 8)) })),
+          h('div', { class: 'flex items-baseline gap-2 mt-0.5' },
+            item.price != null ? h('span', { class: 'text-[16px] font-bold text-rose-500 tabular-nums', text: '¥' + Number(item.price).toFixed(2) }) : h('span', { class: 'text-[12px] text-slate-400', text: '未在本系统上架' }),
+            h('span', { class: 'text-[10px] text-slate-400 truncate', text: 'ID ' + item.item_id }))),
+        link ? h('a', { href: link, target: '_blank', rel: 'noopener noreferrer', class: 'pressable shrink-0 text-[11px] text-brand font-semibold px-2.5 py-1.5 rounded-full bg-brand-light' }, '查看') : null),
+      h('div', { class: 'mt-2.5 pt-2.5 border-t border-slate-100' },
+        h('div', { class: 'flex items-center justify-between mb-1.5' },
+          h('span', { class: `text-[11px] font-semibold px-2 py-0.5 rounded-full ${st.cls}`, text: st.label }),
+          h('span', { class: 'text-[11px] text-slate-500 tabular-nums', text: bargain.stage === 'delivered' && order ? `订单 ${tail(order.order_id, 8)}` : `议价 ${bargain.rounds}/${bargain.max_rounds} 轮 · ${pct}%` })),
+        h('div', { class: 'flex gap-1' }, steps)));
+    refreshIcons();
+  },
+  async loadMsgs(gen, first) {
+    try {
+      const r = await api(`/api/chat/messages?${this.qs()}&after_id=${this.lastId}`);
+      if (gen !== this.gen) return;
+      const msgs = r.messages || [];
+      const box = $('chat-msgs'), body = $('chat-body');
+      if (first) box.replaceChildren();
+      if (first && !msgs.length) box.append(h('div', { class: 'text-center py-10 text-[12px] text-slate-400', text: '暂无聊天记录' }));
+      const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+      let prevTs = box.dataset.lastTs || '';
+      for (const m of msgs) {
+        if (m.id <= this.lastId) continue;           // 去重：重试/重复响应不会重复渲染
+        this.lastId = m.id;
+        if (!prevTs || (new Date(m.timestamp) - new Date(prevTs)) > 5 * 60 * 1000)
+          box.append(h('div', { class: 'text-center text-[10px] text-slate-400 py-1', text: fmtTime(m.timestamp) }));
+        prevTs = m.timestamp;
+        const me = m.role === 'assistant';
+        box.append(h('div', { class: `flex ${me ? 'justify-end' : 'justify-start'} ${first ? '' : 'msg-in'}` },
+          h('div', { class: `selectable max-w-[78%] px-3.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words shadow-sm ${me ? 'bubble-me' : 'bubble-them'}`, text: m.content })));
       }
+      box.dataset.lastTs = prevTs;
+      if (first || nearBottom) body.scrollTop = body.scrollHeight;
+      else if (msgs.length) toast(`${msgs.length} 条新消息`);
+    } catch { if (first && gen === this.gen) $('chat-msgs').replaceChildren(empty('wifi-off', '加载失败，网络恢复后自动重试')); }
+  },
+  async poll() { if (!this.cur) return; const g = this.gen; await Promise.allSettled([this.loadMsgs(g, false), this.loadContext(g)]); },
+};
+document.querySelectorAll('[data-close-sheet]').forEach(el => el.addEventListener('click', () => ChatSheet.close()));
+window.addEventListener('popstate', () => ChatSheet.close(true));
+(function dragToClose() {                      // 抽屉顶部下拉关闭
+  const handle = $('chat-sheet-handle'), sheet = $('chat-sheet');
+  let y0 = 0, dy = 0, on = false;
+  handle.addEventListener('pointerdown', e => { on = true; y0 = e.clientY; dy = 0; sheet.classList.add('dragging'); handle.setPointerCapture(e.pointerId); });
+  handle.addEventListener('pointermove', e => { if (!on) return; dy = Math.max(0, e.clientY - y0); sheet.style.transform = `translateY(${dy}px)`; });
+  const end = () => { if (!on) return; on = false; sheet.classList.remove('dragging'); sheet.style.transform = '';
+    if (dy > 120) { haptic(); ChatSheet.close(); } };
+  handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+})();
+
+/* =====================================================================
+ * 8. 订单
+ * ===================================================================*/
+let orderStatus = 'all', ordersLoaded = false;
+bindSeg('order-seg', 'status', v => { orderStatus = v; ordersLoaded = false; loadOrders(); }, 'all');
+const ORDER_BADGE = { sent: 'bg-emerald-50 text-emerald-700', claimed: 'bg-amber-50 text-amber-700', failed: 'bg-rose-50 text-rose-600' };
+async function loadOrders(silent) {
+  if (!ordersLoaded && !silent) $('order-list').replaceChildren(...skeletons(3));
+  try {
+    const r = await api('/api/delivery/logs?status=' + orderStatus); ordersLoaded = true;
+    const logs = r.logs || [];
+    if (!logs.length) { $('order-list').replaceChildren(empty('package', '暂无订单记录')); return refreshIcons(); }
+    $('order-list').replaceChildren(...logs.map(l => {
+      const content = h('p', { class: 'selectable text-[12px] text-slate-500 font-mono bg-slate-50 p-2 rounded-lg break-all', text: '••••••  点按查看发货内容' });
+      let shown = false;
+      content.addEventListener('click', () => { shown = !shown; content.textContent = shown ? (l.delivery_content || '') : '••••••  点按查看发货内容'; });
+      const front = h('div', { class: 'bg-white p-3 rounded-2xl border border-slate-200/80 space-y-2' },
+        h('div', { class: 'flex items-center justify-between text-[13px]' },
+          h('span', { class: 'font-bold text-slate-800 truncate', text: '单号 ' + (l.order_id || '—') }),
+          h('span', { class: `text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0 ${ORDER_BADGE[l.status] || ORDER_BADGE.sent}`, text: l.confirm_status || '已发货' })),
+        content,
+        h('div', { class: 'flex items-center justify-between text-[11px] text-slate-400' },
+          h('span', { text: `买家 ${tail(l.user_id, 6) || '—'} · ${l.keyword || ''}` }),
+          h('span', { text: fmtTime(l.created_at) })));
+      return swipeRow(front, [
+        { label: '复制单号', cls: 'bg-slate-500', onclick: () => l.order_id ? copyText(l.order_id) : toast('无单号', 'warn') },
+        { label: '复制内容', cls: 'bg-brand', onclick: () => copyText(l.delivery_content || '') },
+      ]);
+    }));
+    refreshIcons();
+  } catch (e) { if (!ordersLoaded) $('order-list').replaceChildren(empty('wifi-off', '加载失败')); }
+}
+
+/* =====================================================================
+ * 9. 商品：卡密池 / 规则 / 上架
+ * ===================================================================*/
+const setSubSeg = bindSeg('product-seg', 'sub', v => setSub(v), 'cards');
+function setSub(sub) {
+  activeSub = sub; setSubSeg(sub);
+  ['cards', 'rules', 'publish'].forEach(s => $('sub-' + s).classList.toggle('hidden', s !== sub));
+  refreshActive(false);
+}
+
+let cardMode = 'single';
+bindSeg('card-mode-seg', 'mode', v => { cardMode = v; $('card-single-box').classList.toggle('hidden', v !== 'single'); $('card-batch-box').classList.toggle('hidden', v !== 'batch'); }, 'single');
+let cardFilter = 'all';
+bindSeg('card-filter-seg', 'f', v => { cardFilter = v; loadCards(); }, 'all');
+
+$('btn-card-save').addEventListener('click', async e => {
+  const btn = e.currentTarget, kw = $('card-kw').value.trim();
+  if (!kw) return toast('请填写商品关键词', 'warn');
+  btn.disabled = true;
+  try {
+    if (cardMode === 'single') {
+      const v = $('card-single').value.trim(); if (!v) return toast('请填写卡密', 'warn');
+      await api('/api/cards/add', { method: 'POST', body: { keyword: kw, card_content: v } });
+      $('card-single').value = ''; toast('已入库');
+    } else {
+      const raw = $('card-batch').value.trim(); if (!raw) return toast('请粘贴卡密', 'warn');
+      const r = await api('/api/cards/import', { method: 'POST', body: { keyword: kw, raw_keys: raw }, timeout: 20000 });
+      $('card-batch').value = ''; toast(`导入 ${r.count} 条${r.skipped ? `，跳过重复 ${r.skipped} 条` : ''}`);
     }
+    haptic(12); loadCards(); loadStats();
+  } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
+});
 
-    function renderChatList(list) {
-      const box = document.getElementById('chat-list-container');
-      box.innerHTML = '';
-      if (!list || list.length === 0) {
-        box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无买家咨询，AI 正在监听中...</div>';
-        return;
-      }
-      list.forEach(c => {
-        const card = document.createElement('div');
-        card.className = "bg-white p-3 rounded-xl border border-slate-200/90 flex items-center justify-between active:bg-slate-50 transition cursor-pointer shadow-xs";
-        card.onclick = () => openChatModal(c.user_id, c.item_id, c.bargain_count);
-
-        const left = document.createElement('div');
-        left.className = "flex items-center space-x-3 min-w-0";
-
-        const ava = document.createElement('div');
-        ava.className = "w-10 h-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs shrink-0";
-        ava.textContent = (c.user_id || '?').slice(-2);
-
-        const info = document.createElement('div');
-        info.className = "min-w-0";
-
-        const headerLine = document.createElement('div');
-        headerLine.className = "flex items-center space-x-1.5";
-        const titleSpan = document.createElement('span');
-        titleSpan.className = "font-bold text-xs text-slate-900 truncate";
-        titleSpan.textContent = '买家 ' + (c.user_id || '').slice(-6);
-        headerLine.appendChild(titleSpan);
-
-        if (c.bargain_count > 0) {
-          const bPill = document.createElement('span');
-          bPill.className = "bg-rose-50 text-rose-600 text-[10px] px-1.5 py-0.5 rounded font-medium";
-          bPill.textContent = '砍价 ' + c.bargain_count + ' 轮';
-          headerLine.appendChild(bPill);
-        }
-
-        const msgP = document.createElement('p');
-        msgP.className = "text-[11px] text-slate-400 truncate mt-0.5";
-        msgP.textContent = (c.last_role === 'assistant' ? '🤖 我: ' : '👤 买家: ') + (c.last_content || '');
-
-        info.appendChild(headerLine);
-        info.appendChild(msgP);
-        left.appendChild(ava);
-        left.appendChild(info);
-
-        const right = document.createElement('div');
-        right.className = "text-right shrink-0";
-        const timeSpan = document.createElement('span');
-        timeSpan.className = "text-[10px] text-slate-400";
-        timeSpan.textContent = c.last_time ? c.last_time.slice(11, 16) : '';
-        const countSpan = document.createElement('span');
-        countSpan.className = "block bg-slate-100 text-slate-600 text-[10px] px-1.5 rounded-full mt-1 font-semibold";
-        countSpan.textContent = c.msg_count;
-
-        right.appendChild(timeSpan);
-        right.appendChild(countSpan);
-
-        card.appendChild(left);
-        card.appendChild(right);
-        box.appendChild(card);
-      });
-      lucide.createIcons();
-    }
-
-    function filterChats() {
-      const q = document.getElementById('chat-search').value.toLowerCase().trim();
-      if (!q) { renderChatList(allChats); return; }
-      const filtered = allChats.filter(c => 
-        (c.user_id && c.user_id.toLowerCase().includes(q)) || 
-        (c.last_content && c.last_content.toLowerCase().includes(q)) || 
-        (c.item_id && c.item_id.toLowerCase().includes(q))
-      );
-      renderChatList(filtered);
-    }
-
-    // 聊天详情 Modal
-    async function openChatModal(userId, itemId, bargainCount) {
-      document.getElementById('modal-buyer-title').textContent = '买家 ' + userId.slice(-6);
-      document.getElementById('modal-buyer-sub').textContent = '咨询买家 ID: ' + userId;
-      document.getElementById('modal-item-id').textContent = '商品ID: ' + itemId;
-      
-      const badge = document.getElementById('modal-bargain-badge');
-      if (bargainCount > 0) {
-        badge.classList.remove('hidden');
-        badge.textContent = `砍价第 ${bargainCount} 轮`;
-      } else {
-        badge.classList.add('hidden');
-      }
-
-      const body = document.getElementById('modal-chat-body');
-      body.innerHTML = '<div class="text-center py-8 text-xs text-slate-400">正在拉取完整聊天历史...</div>';
-      document.getElementById('chat-modal').classList.remove('hidden');
-
-      const res = await fetch(`/api/chat/messages?user_id=${encodeURIComponent(userId)}&item_id=${encodeURIComponent(itemId)}`).then(r => r.json());
-      body.innerHTML = '';
-      (res.messages || []).forEach(m => {
-        const isMe = m.role === 'assistant';
-        const wrap = document.createElement('div');
-        wrap.className = `flex ${isMe ? 'justify-end' : 'justify-start'}`;
-
-        const bubble = document.createElement('div');
-        bubble.className = `max-w-[78%] px-3.5 py-2.5 rounded-2xl text-xs leading-relaxed ${isMe ? 'bg-brand text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none'} shadow-xs break-all whitespace-pre-wrap`;
-        bubble.textContent = m.content;
-
-        wrap.appendChild(bubble);
-        body.appendChild(wrap);
-      });
-      body.scrollTop = body.scrollHeight;
-      lucide.createIcons();
-    }
-
-    function closeChatModal() {
-      document.getElementById('chat-modal').classList.add('hidden');
-    }
-
-    // 订单列表
-    async function loadOrders() {
-      const box = document.getElementById('orders-list-container');
-      const res = await fetch('/api/delivery/logs').then(r => r.json());
-      const logs = res.logs || [];
-      box.innerHTML = '';
-      if (logs.length === 0) {
-        box.innerHTML = '<div class="text-center py-12 text-slate-400 text-xs">暂无发货订单记录</div>';
-        return;
-      }
-      logs.forEach(l => {
-        const card = document.createElement('div');
-        card.className = "bg-white p-3.5 rounded-xl border border-slate-200/90 space-y-1.5 shadow-xs";
-
-        const topRow = document.createElement('div');
-        topRow.className = "flex items-center justify-between text-xs";
-        const ordSpan = document.createElement('span');
-        ordSpan.className = "font-bold text-slate-800";
-        ordSpan.textContent = '单号: ' + (l.order_id || '自动发货');
-        const stSpan = document.createElement('span');
-        stSpan.className = "text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-semibold";
-        stSpan.textContent = l.confirm_status || '已发货';
-        topRow.appendChild(ordSpan);
-        topRow.appendChild(stSpan);
-
-        const contentP = document.createElement('p');
-        contentP.className = "text-[11px] text-slate-600 font-mono bg-slate-50 p-2 rounded-lg break-all";
-        contentP.textContent = l.delivery_content || '';
-
-        const bottomRow = document.createElement('div');
-        bottomRow.className = "flex items-center justify-between text-[10px] text-slate-400";
-        const userSpan = document.createElement('span');
-        userSpan.textContent = '买家: ' + (l.user_id ? l.user_id.slice(-6) : '-');
-        const timeSpan = document.createElement('span');
-        timeSpan.textContent = l.created_at ? l.created_at.slice(5, 16) : '';
-        bottomRow.appendChild(userSpan);
-        bottomRow.appendChild(timeSpan);
-
-        card.appendChild(topRow);
-        card.appendChild(contentP);
-        card.appendChild(bottomRow);
-        box.appendChild(card);
-      });
-    }
-
-    function filterOrderTab(status) {
-      ['all', 'wait_send', 'delivered'].forEach(s => {
-        const btn = document.getElementById('btn-ord-' + s);
-        if (btn) {
-          btn.classList.toggle('bg-white', s === status);
-          btn.classList.toggle('text-slate-900', s === status);
-          btn.classList.toggle('shadow-sm', s === status);
-        }
-      });
-      loadOrders();
-    }
-
-    // 卡密管理
-    function setCardEntryMode(mode) {
-      document.getElementById('card-mode-single-box').classList.toggle('hidden', mode !== 'single');
-      document.getElementById('card-mode-batch-box').classList.toggle('hidden', mode !== 'batch');
-      document.getElementById('btn-card-mode-single').classList.toggle('bg-white', mode === 'single');
-      document.getElementById('btn-card-mode-single').classList.toggle('shadow-xs', mode === 'single');
-      document.getElementById('btn-card-mode-batch').classList.toggle('bg-white', mode === 'batch');
-      document.getElementById('btn-card-mode-batch').classList.toggle('shadow-xs', mode === 'batch');
-    }
-
-    async function submitSingleCard() {
-      const kw = document.getElementById('card-input-keyword').value.trim();
-      const content = document.getElementById('card-input-single').value.trim();
-      if (!kw || !content) { alert('请填写商品关键词和卡密！'); return; }
-      const res = await fetch('/api/cards/add', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ keyword: kw, card_content: content })
-      }).then(r => r.json());
-      if (res.success) {
-        document.getElementById('card-input-single').value = '';
-        loadCardsStock();
-        loadStats();
-        alert('🎉 单个卡密已成功录入！');
-      }
-    }
-
-    async function submitBatchCards() {
-      const kw = document.getElementById('card-input-keyword').value.trim();
-      const raw = document.getElementById('card-input-batch').value.trim();
-      if (!kw || !raw) { alert('请填写商品关键词和多行卡密！'); return; }
-      const res = await fetch('/api/cards/import', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ keyword: kw, raw_keys: raw })
-      }).then(r => r.json());
-      if (res.success) {
-        document.getElementById('card-input-batch').value = '';
-        loadCardsStock();
-        loadStats();
-        alert(`🎉 成功导入 ${res.count} 条卡密入库！`);
-      }
-    }
-
-    let cardTableFilter = 'all';
-    function filterCardTable(status) {
-      cardTableFilter = status;
-      ['all', 'unused', 'used'].forEach(s => {
-        const btn = document.getElementById('ftab-' + s);
-        btn.classList.toggle('bg-slate-200', s === status);
-        btn.classList.toggle('text-slate-800', s === status);
-        btn.classList.toggle('text-slate-500', s !== status);
-      });
-      loadCardsStock();
-    }
-
-    async function loadCardsStock() {
-      const box = document.getElementById('card-table-list');
-      const res = await fetch(`/api/cards/list?status=${cardTableFilter}`).then(r => r.json());
-      const cards = res.cards || [];
-      box.innerHTML = '';
-      if (cards.length === 0) {
-        box.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">暂无对应状态的卡密记录</div>';
-        return;
-      }
-      cards.forEach(c => {
-        const isUsed = c.is_used === 1;
-        const item = document.createElement('div');
-        item.className = "p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between text-xs";
-
-        const left = document.createElement('div');
-        left.className = "min-w-0 pr-2";
-        const top = document.createElement('div');
-        top.className = "flex items-center space-x-1.5";
-        const kwSpan = document.createElement('span');
-        kwSpan.className = "font-bold text-slate-900 truncate";
-        kwSpan.textContent = `[${c.keyword}]`;
-        const stSpan = document.createElement('span');
-        stSpan.className = `${isUsed ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold`;
-        stSpan.textContent = isUsed ? '🔴 已发' : '🟢 在库就绪';
-        top.appendChild(kwSpan);
-        top.appendChild(stSpan);
-
-        const cdP = document.createElement('p');
-        cdP.className = "font-mono text-slate-600 text-[11px] truncate mt-0.5";
-        cdP.textContent = c.card_content;
-
-        left.appendChild(top);
-        left.appendChild(cdP);
-
-        const right = document.createElement('div');
-        right.className = "shrink-0 text-right";
-        const delBtn = document.createElement('button');
-        delBtn.className = "text-rose-500 text-[10px] hover:underline";
-        delBtn.textContent = '删除';
-        delBtn.onclick = () => delCardItem(c.id);
-        right.appendChild(delBtn);
-
-        item.appendChild(left);
-        item.appendChild(right);
-        box.appendChild(item);
-      });
-    }
-
-    async function delCardItem(id) {
-      if (!confirm('确认删除此卡密？')) return;
-      await fetch(`/api/cards/${id}`, { method: 'DELETE' });
-      loadCardsStock();
-      loadStats();
-    }
-
-    // 复合发货规则
-    async function submitDeliveryRule() {
-      const kw = document.getElementById('rule-kw').value.trim();
-      const usePool = document.getElementById('rule-use-pool').checked;
-      const fixed = document.getElementById('rule-fixed-text').value.trim();
-      if (!kw) { alert('请输入关键词！'); return; }
-      if (!usePool && !fixed) { alert('必须至少选择一种发货方式！'); return; }
-      await fetch('/api/delivery/rules', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ keyword: kw, use_card_pool: usePool, delivery_content: fixed })
-      });
-      document.getElementById('rule-kw').value = '';
-      document.getElementById('rule-fixed-text').value = '';
-      loadDeliveryRules();
-      alert('✅ 自动发货规则已生效！');
-    }
-
-    async function loadDeliveryRules() {
-      const box = document.getElementById('rules-card-list');
-      const res = await fetch('/api/delivery/rules').then(r => r.json());
-      const rules = res.rules || [];
-      box.innerHTML = '';
-      if (rules.length === 0) {
-        box.innerHTML = '<div class="text-center py-6 text-xs text-slate-400">暂无发货规则，请在上方添加</div>';
-        return;
-      }
-      rules.forEach(r => {
-        const card = document.createElement('div');
-        card.className = "bg-white p-3 rounded-xl border border-slate-200 shadow-xs text-xs space-y-1.5";
-
-        const top = document.createElement('div');
-        top.className = "flex items-center justify-between font-bold";
-        const kwSpan = document.createElement('span');
-        kwSpan.className = "text-slate-900";
-        kwSpan.textContent = r.keyword;
-        const delBtn = document.createElement('button');
-        delBtn.className = "text-rose-500 text-[11px]";
-        delBtn.textContent = '删除';
-        delBtn.onclick = () => delRuleItem(r.id);
-        top.appendChild(kwSpan);
-        top.appendChild(delBtn);
-
-        const mid = document.createElement('div');
-        mid.className = "flex items-center space-x-1.5";
-        if (r.use_card_pool) {
-          const poolBadge = document.createElement('span');
-          poolBadge.className = "bg-blue-50 text-brand px-1.5 py-0.5 rounded text-[10px] font-semibold";
-          poolBadge.textContent = `🎫 卡密池 (剩余 ${r.card_stock})`;
-          mid.appendChild(poolBadge);
-        }
-        if (r.delivery_content) {
-          const fixBadge = document.createElement('span');
-          fixBadge.className = "bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]";
-          fixBadge.textContent = '🔗 固定网盘/说明';
-          mid.appendChild(fixBadge);
-        }
-
-        card.appendChild(top);
-        card.appendChild(mid);
-
-        if (r.delivery_content) {
-          const fixP = document.createElement('p');
-          fixP.className = "text-[11px] text-slate-500 truncate bg-slate-50 p-1.5 rounded";
-          fixP.textContent = r.delivery_content;
-          card.appendChild(fixP);
-        }
-        box.appendChild(card);
-      });
-    }
-
-    async function delRuleItem(id) {
-      if (!confirm('确认删除该发货规则？')) return;
-      await fetch(`/api/delivery/rules/${id}`, { method: 'DELETE' });
-      loadDeliveryRules();
-    }
-
-    // 商品发布
-    async function submitPublishItem() {
-      const title = document.getElementById('pub-item-title').value.trim();
-      const price = parseFloat(document.getElementById('pub-item-price').value);
-      const orig = parseFloat(document.getElementById('pub-item-orig').value) || price;
-      const desc = document.getElementById('pub-item-desc').value.trim();
-      const imgInput = document.getElementById('pub-item-img');
-
-      if (!title || !desc || isNaN(price) || price <= 0) {
-        alert('请完整填写标题、描述与售价！');
-        return;
-      }
-
-      const btn = document.getElementById('btn-publish-submit');
-      btn.disabled = true;
-      btn.innerText = '⏳ 正在调用闲鱼官方接口上传发布...';
-
-      let imgBase64 = '';
-      if (imgInput.files.length > 0) {
-        imgBase64 = await new Promise(res => {
-          const reader = new FileReader();
-          reader.onload = e => res(e.target.result);
-          reader.readAsDataURL(imgInput.files[0]);
-        });
-      }
-
-      try {
-        const res = await fetch('/api/publish/item', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            title: title,
-            price: price,
-            original_price: orig,
-            description: desc,
-            image_base64: imgBase64
-          })
-        }).then(r => r.json());
-
-        if (res.success) {
-          alert('🎉 宝贝已发布成功！');
-          document.getElementById('pub-item-title').value = '';
-          document.getElementById('pub-item-price').value = '';
-          document.getElementById('pub-item-orig').value = '';
-          document.getElementById('pub-item-desc').value = '';
-          imgInput.value = '';
-          loadPublishedItems();
-          loadStats();
-        } else {
-          alert('发布失败: ' + (res.data ? res.data.message : res.message));
-        }
-      } catch (e) {
-        alert('请求异常: ' + e);
-      } finally {
-        btn.disabled = false;
-        btn.innerText = '🚀 立即调用官方接口发布';
-      }
-    }
-
-    async function loadPublishedItems() {
-      const box = document.getElementById('published-items-list');
-      const res = await fetch('/api/publish/list').then(r => r.json());
-      const items = res.items || [];
-      box.innerHTML = '';
-      if (items.length === 0) {
-        box.innerHTML = '<div class="text-center py-4 text-slate-400">暂无已上架商品记录</div>';
-        return;
-      }
-      items.forEach(it => {
-        const row = document.createElement('div');
-        row.className = "p-2.5 bg-slate-50 rounded-lg flex items-center justify-between";
-        const tSpan = document.createElement('span');
-        tSpan.className = "font-bold truncate max-w-[200px]";
-        tSpan.textContent = it.title;
-        const right = document.createElement('div');
-        right.className = "flex items-center space-x-2 shrink-0";
-        const pSpan = document.createElement('span');
-        pSpan.className = "font-bold text-brand";
-        pSpan.textContent = `¥${it.price}`;
-        right.appendChild(pSpan);
-        if (it.url) {
-          const a = document.createElement('a');
-          a.href = it.url;
-          a.target = "_blank";
-          a.className = "text-blue-500 underline text-[11px]";
-          a.textContent = '查看';
-          right.appendChild(a);
-        }
-        row.appendChild(tSpan);
-        row.appendChild(right);
-        box.appendChild(row);
-      });
-    }
-
-    function loadProductData() {
-      loadCardsStock();
-      loadDeliveryRules();
-      loadPublishedItems();
-    }
-
-    // 设置与 Prompt
-    async function loadSettings() {
-      const pRes = await fetch('/api/prompts').then(r => r.json());
-      if (pRes.prompts) {
-        document.getElementById('setting-prompt-price').value = pRes.prompts.price_prompt || '';
-        document.getElementById('setting-prompt-default').value = pRes.prompts.default_prompt || '';
-      }
-      const cRes = await fetch('/api/config').then(r => r.json());
-      document.getElementById('sys-env-pre').textContent = JSON.stringify(cRes.config || {}, null, 2);
-    }
-
-    async function saveSettingsPrompts() {
-      const payload = {
-        price_prompt: document.getElementById('setting-prompt-price').value,
-        default_prompt: document.getElementById('setting-prompt-default').value
+async function loadCards(silent) {
+  try {
+    const r = await api('/api/cards/list?status=' + cardFilter);
+    const cards = r.cards || [];
+    if (!cards.length) { $('card-list').replaceChildren(empty('ticket', '暂无对应状态的卡密')); return refreshIcons(); }
+    $('card-list').replaceChildren(...cards.map(c => {
+      const used = c.is_used === 1;
+      const txt = h('p', { class: 'selectable font-mono text-slate-600 text-[12px] truncate mt-0.5', text: c.card_masked });
+      let plain = null;
+      const reveal = async () => {
+        if (plain === null) { try { plain = (await api(`/api/cards/${c.id}/reveal`)).card_content; } catch (e) { return toast(e.message, 'err'); } }
+        txt.textContent = txt.textContent === plain ? c.card_masked : plain;
       };
-      const res = await fetch('/api/prompts', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-      }).then(r => r.json());
-      if (res && res.success) {
-        alert('✅ 提示词已保存生效！');
-      } else {
-        alert('保存失败！');
-      }
-    }
+      const front = h('div', { class: 'p-2.5 bg-slate-50 rounded-xl border border-slate-100 text-[12px] cursor-pointer', onclick: reveal },
+        h('div', { class: 'flex items-center gap-1.5' },
+          h('span', { class: 'font-bold text-slate-900 truncate', text: c.keyword }),
+          h('span', { class: `${used ? 'bg-slate-200 text-slate-500' : 'bg-emerald-100 text-emerald-700'} text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0`, text: used ? '已发' : '在库' }),
+          used && c.order_id ? h('span', { class: 'text-[10px] text-slate-400 truncate', text: '单号 ' + tail(c.order_id, 8) }) : null),
+        txt);
+      const actions = [{ label: '复制', cls: 'bg-brand', onclick: async () => { if (plain === null) { try { plain = (await api(`/api/cards/${c.id}/reveal`)).card_content; } catch (e) { return toast(e.message, 'err'); } } copyText(plain); } }];
+      if (!used) actions.push({ label: '删除', cls: 'bg-rose-500', onclick: async () => {
+        if (!(await confirmSheet('删除这条在库卡密？此操作不可撤销', '删除'))) return;
+        try { await api(`/api/cards/${c.id}`, { method: 'DELETE' }); toast('已删除'); loadCards(); loadStats(); } catch (e) { toast(e.message, 'err'); }
+      } });
+      return swipeRow(front, actions);
+    }));
+    refreshIcons();
+  } catch (e) { if (!silent) toast(e.message, 'err'); }
+}
 
-    // 页面初始化
-    loadStats();
-    loadChats();
-    lucide.createIcons();
-    setInterval(loadStats, 10000);
-  </script>
+$('btn-rule-save').addEventListener('click', async () => {
+  const kw = $('rule-kw').value.trim(), pool = $('rule-pool').checked, fixed = $('rule-fixed').value.trim();
+  if (!kw) return toast('请输入关键词', 'warn');
+  if (!pool && !fixed) return toast('至少选择一种发货方式', 'warn');
+  try {
+    await api('/api/delivery/rules', { method: 'POST', body: { keyword: kw, use_card_pool: pool, delivery_content: fixed } });
+    $('rule-kw').value = ''; $('rule-fixed').value = ''; haptic(12); toast('规则已生效'); loadRules();
+  } catch (e) { toast(e.message, 'err'); }
+});
+async function loadRules(silent) {
+  try {
+    const rules = (await api('/api/delivery/rules')).rules || [];
+    if (!rules.length) { $('rule-list').replaceChildren(empty('zap', '暂无发货规则')); return refreshIcons(); }
+    $('rule-list').replaceChildren(...rules.map(r => {
+      const low = r.use_card_pool && r.card_stock < 5;
+      const front = h('div', { class: 'bg-white p-3 rounded-2xl border border-slate-200/80 text-[12px] space-y-1.5' },
+        h('div', { class: 'font-bold text-[13px] text-slate-900 truncate', text: r.keyword }),
+        h('div', { class: 'flex flex-wrap gap-1.5' },
+          r.use_card_pool ? h('span', { class: `${low ? 'bg-rose-50 text-rose-600' : 'bg-brand-light text-brand'} px-1.5 py-0.5 rounded text-[10px] font-semibold`, text: `卡密池 剩余 ${r.card_stock}${low ? ' · 库存告急' : ''}` }) : null,
+          r.delivery_content ? h('span', { class: 'bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[10px]', text: '固定内容' }) : null),
+        r.delivery_content ? h('p', { class: 'text-[11px] text-slate-400 truncate bg-slate-50 p-1.5 rounded', text: r.delivery_content }) : null);
+      return swipeRow(front, [{ label: '删除', cls: 'bg-rose-500', onclick: async () => {
+        if (!(await confirmSheet(`删除规则「${r.keyword}」？`, '删除'))) return;
+        try { await api(`/api/delivery/rules/${r.id}`, { method: 'DELETE' }); toast('已删除'); loadRules(); } catch (e) { toast(e.message, 'err'); }
+      } }]);
+    }));
+    refreshIcons();
+  } catch (e) { if (!silent) toast(e.message, 'err'); }
+}
+
+$('pub-img').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (f.size > 5 * 1024 * 1024) { e.target.value = ''; return toast('图片不能超过 5MB', 'warn'); }
+  const url = URL.createObjectURL(f);
+  $('pub-preview').src = url; $('pub-preview').classList.remove('hidden');
+  $('pub-img-label').textContent = f.name;
+});
+$('btn-publish').addEventListener('click', async e => {
+  const btn = e.currentTarget;
+  const title = $('pub-title').value.trim(), desc = $('pub-desc').value.trim();
+  const price = parseFloat($('pub-price').value), orig = parseFloat($('pub-orig').value) || price;
+  if (!title || !desc || !(price > 0)) return toast('请完整填写标题、描述与售价', 'warn');
+  if (!(await confirmSheet(`以 ¥${price.toFixed(2)} 发布「${title}」到闲鱼？`, '立即发布', false))) return;
+  btn.disabled = true; btn.textContent = '发布中…';
+  try {
+    let img = '';
+    const f = $('pub-img').files[0];
+    if (f) img = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(f); });
+    const r = await api('/api/publish/item', { method: 'POST', timeout: 60000, body: { title, description: desc, price, original_price: orig, image_base64: img } });
+    if (r.success) {
+      haptic(15); toast('发布成功');
+      ['pub-title', 'pub-price', 'pub-orig', 'pub-desc', 'pub-img'].forEach(id => $(id).value = '');
+      $('pub-preview').classList.add('hidden'); $('pub-img-label').textContent = '添加主图（≤5MB）';
+      loadPublished(); loadStats();
+    } else toast('发布失败：' + ((r.data && r.data.message) || '未知错误'), 'err');
+  } catch (err) { toast(err.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '立即发布'; }
+});
+async function loadPublished(silent) {
+  try {
+    const items = (await api('/api/publish/list')).items || [];
+    if (!items.length) { $('pub-list').replaceChildren(empty('store', '暂无已上架商品')); return refreshIcons(); }
+    $('pub-list').replaceChildren(...items.map(it => {
+      const link = safeUrl(it.url);
+      return h('div', { class: 'p-2.5 bg-slate-50 rounded-xl flex items-center justify-between gap-2 text-[12px]' },
+        h('span', { class: 'font-semibold truncate', text: it.title }),
+        h('div', { class: 'flex items-center gap-2 shrink-0' },
+          h('span', { class: 'font-bold text-rose-500 tabular-nums', text: '¥' + Number(it.price).toFixed(2) }),
+          link ? h('a', { href: link, target: '_blank', rel: 'noopener noreferrer', class: 'text-brand text-[11px] font-semibold' }, '查看') : null));
+    }));
+    refreshIcons();
+  } catch (e) { if (!silent) toast(e.message, 'err'); }
+}
+
+/* =====================================================================
+ * 10. 设置
+ * ===================================================================*/
+async function loadSettings() {
+  try {
+    const p = (await api('/api/prompts')).prompts || {};
+    $('prompt-price').value = p.price_prompt || ''; $('prompt-default').value = p.default_prompt || '';
+    const c = (await api('/api/config')).config || {};
+    $('sys-env').textContent = JSON.stringify(c, null, 2);
+  } catch (e) { toast(e.message, 'err'); }
+}
+document.querySelectorAll('[data-save-prompt]').forEach(b => b.addEventListener('click', async () => {
+  try {
+    await api('/api/prompts', { method: 'POST', body: { price_prompt: $('prompt-price').value, default_prompt: $('prompt-default').value } });
+    haptic(12); toast('提示词已保存');
+  } catch (e) { toast(e.message, 'err'); }
+}));
+$('btn-logout').addEventListener('click', async () => {
+  if (!(await confirmSheet('清除本机保存的 Token？', '退出'))) return;
+  localStorage.removeItem('xy_token'); token = ''; etagCache.clear(); askToken();
+});
+
+/* =====================================================================
+ * 11. 下拉刷新 + 顶部占位
+ * ===================================================================*/
+(function pullToRefresh() {
+  const sc = $('main-scroll'), ptr = $('ptr'), txt = $('ptr-text');
+  let y0 = null, d = 0;
+  sc.addEventListener('touchstart', e => { y0 = sc.scrollTop <= 0 ? e.touches[0].clientY : null; d = 0; }, { passive: true });
+  sc.addEventListener('touchmove', e => {
+    if (y0 === null) return; d = Math.max(0, (e.touches[0].clientY - y0) * 0.45);
+    ptr.style.transition = 'none'; ptr.style.height = Math.min(d, 70) + 'px';
+    txt.textContent = d > 56 ? '松手刷新' : '下拉刷新';
+  }, { passive: true });
+  sc.addEventListener('touchend', async () => {
+    if (y0 === null) return; y0 = null; ptr.style.transition = '';
+    if (d > 56) { haptic(); txt.textContent = '刷新中…'; ptr.style.height = '40px'; etagCache.clear();
+      await Promise.allSettled([loadStats(), refreshActive(false)]); }
+    ptr.style.height = '0';
+  });
+})();
+function syncHeaderSpace() { $('header-spacer').style.height = document.querySelector('header').offsetHeight + 'px'; }
+window.addEventListener('resize', syncHeaderSpace);
+
+/* =====================================================================
+ * 12. 启动
+ * ===================================================================*/
+syncHeaderSpace();
+refreshIcons();
+if (!token) askToken();
+switchTab('messages');
+loadStats();
+Poller.schedule();
+</script>
 </body>
 </html>

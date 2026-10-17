@@ -2,7 +2,7 @@ import time
 import json
 import requests
 from loguru import logger
-from utils.xianyu_utils import generate_sign
+from app.utils.xianyu_utils import generate_sign
 
 class XianyuDeliveryService:
     """闲鱼自动发货与确认服务"""

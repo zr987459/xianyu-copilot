@@ -1,30 +1,87 @@
 import os
+import hmac
 import base64
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List
+import hashlib
+import secrets
+import sqlite3
+from typing import Optional, Literal
 
-from app.db.database import get_db, init_db
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from app.db.database import db, write_tx, init_db
+from app.db.card_pool import OutOfStock, claim_card_for_order, mark_delivery  # noqa: F401  (mark_delivery 供机器人复用)
 from app.services.publisher_service import XianyuPublisherService
 from app.services.XianyuApis import XianyuApis
 
 app = FastAPI(title="Xianyu Copilot API", version="1.1.0")
 
-_origins = os.getenv("ALLOW_ORIGINS", "*").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[o.strip() for o in _origins if o.strip()],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["*"],
-)
-
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 
-ALLOWED_PROMPTS = {"classify_prompt", "price_prompt", "tech_prompt", "default_prompt"}
+# ======================================================================
+# 安全基线
+# ======================================================================
+
+# 1) CORS：原来是 allow_origins=["*"] + allow_credentials=True，任何网页都能驱动你的后台。
+#    现在默认同源；确需跨域时用 CORS_ORIGINS=https://a.com,https://b.com 显式放行。
+_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "If-None-Match"],
+        expose_headers=["ETag"],
+    )
+
+# 2) 鉴权：所有 /api/* 需要 Bearer Token。未配置时启动生成一次性随机 Token 并打印到控制台。
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN") or secrets.token_urlsafe(24)
+if not os.getenv("ADMIN_TOKEN"):
+    print(f"[SECURITY] 未设置 ADMIN_TOKEN，本次启动临时 Token：{ADMIN_TOKEN}")
+
+BARGAIN_MAX_ROUNDS = int(os.getenv("BARGAIN_MAX_ROUNDS", "3"))
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMPORT_LINES = 5000
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.method != "OPTIONS":
+        auth = request.headers.get("authorization", "")
+        token = auth[7:] if auth.lower().startswith("bearer ") else ""
+        if not token or not hmac.compare_digest(token, ADMIN_TOKEN):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    resp = await call_next(request)
+    # 纵深防御：即便前端将来有漏网的注入点，CSP 也能挡住外部脚本与内联事件
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    if request.url.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
+
+
+def etag_json(request: Request, payload: dict) -> Response:
+    """弱网优化：内容没变就回 304，移动端静默轮询几乎零流量。"""
+    import json
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    tag = 'W/"' + hashlib.sha1(body.encode()).hexdigest()[:16] + '"'
+    if request.headers.get("if-none-match") == tag:
+        return Response(status_code=304, headers={"ETag": tag})
+    return Response(body, media_type="application/json", headers={"ETag": tag})
+
+
+def mask_card(s: str) -> str:
+    if not s:
+        return ""
+    if len(s) <= 6:
+        return s[0] + "•" * (len(s) - 1)
+    return s[:3] + "•" * min(8, len(s) - 6) + s[-3:]
 
 
 def get_publisher_instance():
@@ -45,243 +102,197 @@ def get_publisher_instance():
 @app.on_event("startup")
 def startup_event():
     init_db()
-    conn = get_db()
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_order "
-        "ON card_keys(order_id) WHERE order_id IS NOT NULL;"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_card_claim "
-        "ON card_keys(keyword, is_used, id);"
-    )
-    conn.commit()
-    conn.close()
 
 
-# ========= 卡密原子出库（防超卖 / 事务独享） =========
-def claim_card(keyword: str, order_id: str):
-    """原子化提取单张可用卡密，避免高并发重复发放与超卖"""
-    conn = get_db()
-    try:
-        conn.execute("PRAGMA busy_timeout=5000;")
-        conn.execute("BEGIN IMMEDIATE;")
-        # 若该订单已有分配记录，直接返回历史卡密
-        hit = conn.execute(
-            "SELECT card_content FROM card_keys WHERE order_id=? LIMIT 1",
-            (order_id,),
-        ).fetchone()
-        if hit:
-            conn.commit()
-            return dict(hit)
-        row = conn.execute(
-            """
-            UPDATE card_keys
-               SET is_used=1, order_id=?, used_at=CURRENT_TIMESTAMP
-             WHERE id = (SELECT id FROM card_keys
-                          WHERE keyword=? AND is_used=0
-                          ORDER BY id ASC LIMIT 1)
-            RETURNING id, card_content;
-            """,
-            (order_id, keyword),
-        ).fetchone()
-        conn.commit()
-        return dict(row) if row else None
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+# ======================================================================
+# 概览
+# ======================================================================
 
-
-class ClaimRequest(BaseModel):
-    keyword: str
-    order_id: str
-
-
-@app.post("/api/cards/claim")
-def claim_card_api(data: ClaimRequest):
-    card = claim_card(data.keyword.strip(), data.order_id.strip())
-    if card is None:
-        raise HTTPException(status_code=409, detail="库存不足，卡密已被抢空")
-    return {"success": True, "card_content": card["card_content"]}
-
-
-# ========= 概览指标 =========
 @app.get("/api/stats")
-def get_stats():
-    conn = get_db()
-    c = conn.cursor()
-    total_msgs = c.execute("SELECT count(*) AS count FROM messages").fetchone()["count"]
-    total_users = c.execute("SELECT count(distinct user_id) AS count FROM messages").fetchone()["count"]
-    total_items = c.execute("SELECT count(*) AS count FROM published_items").fetchone()["count"]
-    total_delivered = c.execute("SELECT count(*) AS count FROM delivery_logs").fetchone()["count"]
-    available_cards = c.execute("SELECT count(*) AS count FROM card_keys WHERE is_used=0").fetchone()["count"]
-    used_cards = c.execute("SELECT count(*) AS count FROM card_keys WHERE is_used=1").fetchone()["count"]
-    conn.close()
-    return {
-        "total_msgs": total_msgs,
-        "total_users": total_users,
-        "total_items": total_items,
-        "total_delivered": total_delivered,
-        "available_cards": available_cards,
-        "used_cards": used_cards,
-    }
+def get_stats(request: Request):
+    with db() as conn:
+        c = conn.cursor()
+        one = lambda q: c.execute(q).fetchone()[0] or 0
+        payload = {
+            "total_msgs": one("SELECT count(*) FROM messages"),
+            "total_users": one("SELECT count(DISTINCT user_id) FROM messages"),
+            "total_items": one("SELECT count(*) FROM published_items"),
+            "total_delivered": one("SELECT count(*) FROM delivery_logs WHERE status='sent'"),
+            "pending_delivery": one("SELECT count(*) FROM delivery_logs WHERE status IN ('claimed','failed')"),
+            "available_cards": one("SELECT count(*) FROM card_keys WHERE is_used=0"),
+            "used_cards": one("SELECT count(*) FROM card_keys WHERE is_used=1"),
+            "latest_msg_id": one("SELECT max(id) FROM messages"),
+        }
+    return etag_json(request, payload)
 
 
-# ========= 消息 Tab =========
+# ======================================================================
+# 消息
+# ======================================================================
+
 @app.get("/api/chats")
-def get_chats():
-    conn = get_db()
-    c = conn.cursor()
-    rows = c.execute(
-        """
-        SELECT m.user_id, m.item_id, m.chat_id,
-               max(m.timestamp) AS last_time, count(*) AS msg_count
-        FROM messages m
-        GROUP BY m.user_id, m.item_id
-        ORDER BY last_time DESC
-        LIMIT 50
-        """
-    ).fetchall()
-    chats = []
-    for r in rows:
-        last_msg = c.execute(
-            "SELECT role, content FROM messages WHERE user_id=? AND item_id=? ORDER BY id DESC LIMIT 1",
-            (r["user_id"], r["item_id"]),
-        ).fetchone()
-        b_count = 0
-        if r["chat_id"]:
-            bc = c.execute("SELECT count FROM chat_bargain_counts WHERE chat_id=?", (r["chat_id"],)).fetchone()
-            if bc:
-                b_count = bc["count"]
-        chats.append({
-            "user_id": r["user_id"],
-            "item_id": r["item_id"],
-            "chat_id": r["chat_id"],
-            "last_time": r["last_time"],
-            "msg_count": r["msg_count"],
-            "last_role": last_msg["role"] if last_msg else "",
-            "last_content": last_msg["content"] if last_msg else "",
-            "bargain_count": b_count,
-        })
-    conn.close()
-    return {"chats": chats}
+def get_chats(request: Request):
+    with db() as conn:
+        rows = conn.execute("""
+            WITH last AS (
+                SELECT user_id, item_id, max(id) AS last_id, count(*) AS msg_count, max(timestamp) AS last_time
+                FROM messages GROUP BY user_id, item_id
+            )
+            SELECT l.user_id, l.item_id, l.msg_count, l.last_time, m.chat_id, m.role AS last_role,
+                   m.content AS last_content, COALESCE(b.count, 0) AS bargain_count,
+                   p.title AS item_title, p.price AS item_price
+            FROM last l
+            JOIN messages m ON m.id = l.last_id
+            LEFT JOIN chat_bargain_counts b ON b.chat_id = m.chat_id
+            LEFT JOIN published_items p ON p.item_id = l.item_id
+            ORDER BY l.last_id DESC LIMIT 50
+        """).fetchall()   # 原实现是 N+1 查询，50 个会话要打 101 次 SQL
+    return etag_json(request, {"chats": [dict(r) for r in rows]})
 
 
 @app.get("/api/chat/messages")
-def get_chat_messages(user_id: str, item_id: str):
-    conn = get_db()
-    c = conn.cursor()
-    rows = c.execute(
-        "SELECT id, role, content, timestamp FROM messages WHERE user_id=? AND item_id=? ORDER BY id ASC",
-        (user_id, item_id),
-    ).fetchall()
-    conn.close()
-    return {"messages": [dict(r) for r in rows]}
+def get_chat_messages(request: Request, user_id: str = Query(..., max_length=64),
+                      item_id: str = Query(..., max_length=64), after_id: int = 0):
+    """after_id>0 时只返回增量，抽屉打开期间静默轮询用。"""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id, role, content, timestamp FROM messages
+            WHERE user_id=? AND item_id=? AND id>?
+            ORDER BY id ASC LIMIT 500
+        """, (user_id, item_id, after_id)).fetchall()
+    return etag_json(request, {"messages": [dict(r) for r in rows]})
 
 
-# ========= 发货规则 & 卡密池 Tab =========
+@app.get("/api/chat/context")
+def get_chat_context(request: Request, user_id: str = Query(..., max_length=64),
+                     item_id: str = Query(..., max_length=64)):
+    """【在谈宝贝】悬浮卡 + 议价状态条的数据源。"""
+    with db() as conn:
+        item = conn.execute(
+            "SELECT item_id, title, price, url FROM published_items WHERE item_id=? ORDER BY id DESC LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        chat = conn.execute(
+            "SELECT chat_id FROM messages WHERE user_id=? AND item_id=? AND chat_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (user_id, item_id),
+        ).fetchone()
+        rounds = 0
+        if chat:
+            b = conn.execute("SELECT count FROM chat_bargain_counts WHERE chat_id=?", (chat["chat_id"],)).fetchone()
+            rounds = b["count"] if b else 0
+        delivered = conn.execute(
+            "SELECT status, order_id FROM delivery_logs WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+
+    if delivered and delivered["status"] == "sent":
+        stage = "delivered"
+    elif rounds >= BARGAIN_MAX_ROUNDS:
+        stage = "floor"          # 已到底价，AI 不再让步
+    elif rounds > 0:
+        stage = "bargaining"
+    else:
+        stage = "inquiry"
+
+    return etag_json(request, {
+        "item": dict(item) if item else {"item_id": item_id, "title": None, "price": None, "url": None},
+        "bargain": {"rounds": rounds, "max_rounds": BARGAIN_MAX_ROUNDS, "stage": stage},
+        "order": dict(delivered) if delivered else None,
+    })
+
+
+# ======================================================================
+# 发货规则 & 卡密池
+# ======================================================================
+
 class RuleCreate(BaseModel):
-    keyword: str
-    delivery_content: Optional[str] = ""
+    keyword: str = Field(..., min_length=1, max_length=64)
+    delivery_content: Optional[str] = Field("", max_length=4000)
     use_card_pool: bool = False
     auto_confirm: bool = True
 
 
 @app.get("/api/delivery/rules")
-def get_delivery_rules():
-    conn = get_db()
-    c = conn.cursor()
-    rows = c.execute("SELECT * FROM auto_delivery_rules ORDER BY id DESC").fetchall()
-    rules = []
-    for r in rows:
-        item = dict(r)
-        stock = c.execute(
-            """
-            SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN is_used=0 THEN 1 ELSE 0 END) AS unused,
-                   SUM(CASE WHEN is_used=1 THEN 1 ELSE 0 END) AS used
-            FROM card_keys WHERE keyword=?
-            """,
-            (item["keyword"],),
-        ).fetchone()
-        item["card_total"] = stock["total"] or 0
-        item["card_stock"] = stock["unused"] or 0
-        item["card_used"] = stock["used"] or 0
-        rules.append(item)
-    conn.close()
-    return {"rules": rules}
+def get_delivery_rules(request: Request):
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT r.*,
+                   COUNT(k.id) AS card_total,
+                   COALESCE(SUM(k.is_used=0), 0) AS card_stock,
+                   COALESCE(SUM(k.is_used=1), 0) AS card_used
+            FROM auto_delivery_rules r
+            LEFT JOIN card_keys k ON k.keyword = r.keyword
+            GROUP BY r.id ORDER BY r.id DESC
+        """).fetchall()
+    return etag_json(request, {"rules": [dict(r) for r in rows]})
 
 
 @app.post("/api/delivery/rules")
 def create_rule(data: RuleCreate):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT OR REPLACE INTO auto_delivery_rules
-            (keyword, delivery_content, use_card_pool, auto_confirm, enabled)
-        VALUES (?, ?, ?, ?, 1)
-        """,
-        (data.keyword.strip(), data.delivery_content.strip(),
-         1 if data.use_card_pool else 0, 1 if data.auto_confirm else 0),
-    )
-    conn.commit()
-    conn.close()
+    if not data.use_card_pool and not (data.delivery_content or "").strip():
+        raise HTTPException(400, "至少选择一种发货方式")
+    with db() as conn:
+        # 用 UPSERT 代替 INSERT OR REPLACE：后者会先删后插，id 变化且丢失 created_at
+        conn.execute("""
+            INSERT INTO auto_delivery_rules (keyword, delivery_content, use_card_pool, auto_confirm, enabled)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(keyword) DO UPDATE SET
+                delivery_content=excluded.delivery_content,
+                use_card_pool=excluded.use_card_pool,
+                auto_confirm=excluded.auto_confirm,
+                enabled=1
+        """, (data.keyword.strip(), (data.delivery_content or "").strip(),
+              int(data.use_card_pool), int(data.auto_confirm)))
     return {"success": True}
 
 
 @app.delete("/api/delivery/rules/{rule_id}")
 def delete_rule(rule_id: int):
-    conn = get_db()
-    conn.execute("DELETE FROM auto_delivery_rules WHERE id=?", (rule_id,))
-    conn.commit()
-    conn.close()
+    with db() as conn:
+        conn.execute("DELETE FROM auto_delivery_rules WHERE id=?", (rule_id,))
     return {"success": True}
 
 
 class SingleCardCreate(BaseModel):
-    keyword: str
-    card_content: str
+    keyword: str = Field(..., min_length=1, max_length=64)
+    card_content: str = Field(..., min_length=1, max_length=2000)
 
 
 @app.post("/api/cards/add")
 def add_single_card(data: SingleCardCreate):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-        (data.keyword.strip(), data.card_content.strip()),
-    )
-    conn.commit()
-    conn.close()
+    with db() as conn:
+        try:
+            conn.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+                         (data.keyword.strip(), data.card_content.strip()))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "该卡密已存在")
     return {"success": True}
 
 
 class BatchCardImport(BaseModel):
-    keyword: str
-    raw_keys: str
+    keyword: str = Field(..., min_length=1, max_length=64)
+    raw_keys: str = Field(..., max_length=1_000_000)
 
 
 @app.post("/api/cards/import")
 def import_cards(data: BatchCardImport):
-    lines = [ln.strip() for ln in data.raw_keys.split("\n") if ln.strip()]
-    conn = get_db()
-    c = conn.cursor()
-    for card in lines:
-        c.execute("INSERT INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
-                  (data.keyword.strip(), card))
-    conn.commit()
-    conn.close()
-    return {"success": True, "count": len(lines)}
+    lines = list(dict.fromkeys(l.strip() for l in data.raw_keys.splitlines() if l.strip()))
+    if len(lines) > MAX_IMPORT_LINES:
+        raise HTTPException(400, f"单次最多导入 {MAX_IMPORT_LINES} 条")
+    kw = data.keyword.strip()
+    with db() as conn, write_tx(conn):     # 整批一个事务：要么全进，要么全不进
+        before = conn.total_changes
+        conn.executemany(
+            "INSERT OR IGNORE INTO card_keys (keyword, card_content, is_used) VALUES (?, ?, 0)",
+            [(kw, x) for x in lines],
+        )
+        inserted = conn.total_changes - before
+    return {"success": True, "count": inserted, "skipped": len(lines) - inserted}
 
 
 @app.get("/api/cards/list")
-def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
-    conn = get_db()
-    query = "SELECT * FROM card_keys WHERE 1=1"
-    params = []
+def get_card_list(request: Request, keyword: Optional[str] = "",
+                  status: Literal["all", "unused", "used"] = "all"):
+    query, params = "SELECT id, keyword, card_content, is_used, order_id, used_at, created_at FROM card_keys WHERE 1=1", []
     if keyword:
         query += " AND keyword=?"
         params.append(keyword)
@@ -290,78 +301,129 @@ def get_card_list(keyword: Optional[str] = "", status: Optional[str] = "all"):
     elif status == "used":
         query += " AND is_used=1"
     query += " ORDER BY id DESC LIMIT 200"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return {"cards": [dict(r) for r in rows]}
+    with db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    cards = []
+    for r in rows:
+        d = dict(r)
+        d["card_masked"] = mask_card(d.pop("card_content"))   # 列表默认脱敏，明文需单独请求
+        cards.append(d)
+    return etag_json(request, {"cards": cards})
+
+
+@app.get("/api/cards/{card_id}/reveal")
+def reveal_card(card_id: int):
+    with db() as conn:
+        r = conn.execute("SELECT card_content FROM card_keys WHERE id=?", (card_id,)).fetchone()
+    if not r:
+        raise HTTPException(404)
+    return {"card_content": r["card_content"]}
 
 
 @app.delete("/api/cards/{card_id}")
 def delete_card(card_id: int):
-    conn = get_db()
-    conn.execute("DELETE FROM card_keys WHERE id=?", (card_id,))
-    conn.commit()
-    conn.close()
+    with db() as conn:
+        cur = conn.execute("DELETE FROM card_keys WHERE id=? AND is_used=0", (card_id,))
+    if cur.rowcount == 0:
+        raise HTTPException(409, "已发出的卡密不能删除（保留对账凭证）")
     return {"success": True}
 
 
 @app.get("/api/delivery/logs")
-def get_delivery_logs():
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM delivery_logs ORDER BY id DESC LIMIT 50").fetchall()
-    conn.close()
-    return {"logs": [dict(r) for r in rows]}
+def get_delivery_logs(request: Request, status: Literal["all", "pending", "sent"] = "all"):
+    q = "SELECT * FROM delivery_logs"
+    if status == "pending":
+        q += " WHERE status IN ('claimed','failed')"
+    elif status == "sent":
+        q += " WHERE status='sent'"
+    q += " ORDER BY id DESC LIMIT 100"
+    with db() as conn:
+        rows = conn.execute(q).fetchall()
+    return etag_json(request, {"logs": [dict(r) for r in rows]})
 
 
-# ========= 商品上架 Tab =========
+class ClaimRequest(BaseModel):
+    order_id: str = Field(..., min_length=1, max_length=64)
+    keyword: str = Field(..., min_length=1, max_length=64)
+    user_id: Optional[str] = Field("", max_length=64)
+    chat_id: Optional[str] = Field("", max_length=64)
+
+
+@app.post("/api/delivery/claim")
+def claim_api(data: ClaimRequest):
+    """手动发货 / 补发入口。重复点击同一单只会拿到同一张卡。"""
+    with db() as conn:
+        rule = conn.execute("SELECT delivery_content FROM auto_delivery_rules WHERE keyword=?",
+                            (data.keyword,)).fetchone()
+    try:
+        res = claim_card_for_order(data.order_id, data.keyword, data.user_id, data.chat_id,
+                                   rule["delivery_content"] if rule else "")
+    except OutOfStock:
+        raise HTTPException(409, f"「{data.keyword}」卡密库存不足")
+    res.pop("content", None)       # 明文不回传给前端，发送由后端机器人完成
+    return {"success": True, **res}
+
+
+# ======================================================================
+# 商品上架
+# ======================================================================
+
 class PublishItemRequest(BaseModel):
-    title: str
-    description: str
-    price: float
-    original_price: Optional[float] = None
-    image_base64: Optional[str] = ""
+    title: str = Field(..., min_length=1, max_length=60)
+    description: str = Field(..., min_length=1, max_length=5000)
+    price: float = Field(..., gt=0, lt=1_000_000)
+    original_price: Optional[float] = Field(None, gt=0, lt=1_000_000)
+    image_base64: Optional[str] = Field("", max_length=8 * 1024 * 1024)
 
 
 @app.post("/api/publish/item")
 def publish_item_api(data: PublishItemRequest):
-    publisher = get_publisher_instance()
     images = []
     if data.image_base64:
         raw_b64 = data.image_base64.split(",", 1)[1] if "," in data.image_base64 else data.image_base64
         try:
-            images.append(base64.b64decode(raw_b64))
+            img = base64.b64decode(raw_b64, validate=True)
         except Exception:
-            pass
+            raise HTTPException(400, "图片编码无效")
+        if len(img) > MAX_IMAGE_BYTES:
+            raise HTTPException(413, "图片不能超过 5MB")
+        if not (img[:3] == b"\xff\xd8\xff" or img[:8] == b"\x89PNG\r\n\x1a\n" or img[8:12] == b"WEBP"):
+            raise HTTPException(400, "仅支持 JPG / PNG / WEBP")
+        images.append(img)
+
+    publisher = get_publisher_instance()
     success, res = publisher.publish_item(
-        title=data.title,
-        description=data.description,
-        price=data.price,
-        original_price=data.original_price or data.price,
-        image_urls_or_bytes=images,
+        title=data.title, description=data.description, price=data.price,
+        original_price=data.original_price or data.price, image_urls_or_bytes=images,
     )
     if success:
-        conn = get_db()
-        conn.execute(
-            "INSERT INTO published_items (item_id, title, price, url) VALUES (?, ?, ?, ?)",
-            (str(res.get("item_id")), data.title, data.price, res.get("url")),
-        )
-        conn.commit()
-        conn.close()
+        url = res.get("url") or ""
+        if not url.startswith("https://"):
+            url = ""                       # 只存 https 链接，前端也会再校验一次
+        with db() as conn:
+            conn.execute("INSERT INTO published_items (item_id, title, price, url) VALUES (?, ?, ?, ?)",
+                         (str(res.get("item_id")), data.title, data.price, url))
     return {"success": success, "data": res}
 
 
 @app.get("/api/publish/list")
-def get_published_list():
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM published_items ORDER BY id DESC").fetchall()
-    conn.close()
-    return {"items": [dict(r) for r in rows]}
+def get_published_list(request: Request):
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM published_items ORDER BY id DESC LIMIT 200").fetchall()
+    return etag_json(request, {"items": [dict(r) for r in rows]})
 
 
-# ========= 设置与 Prompt Tab（路径白名单防穿越） =========
+# ======================================================================
+# 设置与 Prompt
+# ======================================================================
+
+PROMPT_FILES = ("classify_prompt", "price_prompt", "tech_prompt", "default_prompt")
+
+
 @app.get("/api/prompts")
 def get_prompts():
     prompts = {}
-    for name in ALLOWED_PROMPTS:
+    for name in PROMPT_FILES:
         path = os.path.join(PROMPTS_DIR, f"{name}.txt")
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as fp:
@@ -371,31 +433,35 @@ def get_prompts():
 
 @app.post("/api/prompts")
 def save_prompts(data: dict):
+    # 原实现直接用 body 的 key 拼路径：{"../.env": "..."} 就能覆盖任意文件 → 严重漏洞
     for name, content in data.items():
-        if name not in ALLOWED_PROMPTS:
-            raise HTTPException(status_code=400, detail=f"invalid prompt name: {name}")
-        if not isinstance(content, str):
-            raise HTTPException(status_code=400, detail="content must be string")
+        if name not in PROMPT_FILES:
+            raise HTTPException(400, f"未知 Prompt: {name}")
+        if not isinstance(content, str) or len(content) > 50_000:
+            raise HTTPException(400, "Prompt 内容无效或过长")
+    os.makedirs(PROMPTS_DIR, exist_ok=True)
+    for name, content in data.items():
         path = os.path.join(PROMPTS_DIR, f"{name}.txt")
-        if os.path.dirname(os.path.abspath(path)) != os.path.abspath(PROMPTS_DIR):
-            raise HTTPException(status_code=400, detail="path escape blocked")
-        with open(path, "w", encoding="utf-8") as fp:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fp:
             fp.write(content)
+        os.replace(tmp, path)               # 原子替换，写一半断电也不会留下半截文件
     return {"success": True}
 
 
 @app.get("/api/config")
 def get_config():
     cfg = {}
-    allow = {"API_TYPE", "MODEL_NAME", "MODEL_BASE_URL", "TOGGLE_KEYWORDS", "SIMULATE_HUMAN_TYPING"}
     if os.path.exists(ENV_PATH):
         with open(ENV_PATH, "r", encoding="utf-8") as fp:
             for line in fp:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    if k in allow:
+                    if k in ("API_TYPE", "MODEL_NAME", "TOGGLE_KEYWORDS", "SIMULATE_HUMAN_TYPING"):
                         cfg[k] = v
+                    elif k == "MODEL_BASE_URL":
+                        cfg[k] = v.split("?")[0]
                     elif k == "API_KEY":
-                        cfg[k] = (v[:6] + "..." + v[-4:]) if len(v) > 10 else "***"
+                        cfg[k] = "已配置" if v else "未配置"   # 前后各露几位也会降低爆破成本，直接不露
     return {"config": cfg}
