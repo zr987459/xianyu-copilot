@@ -12,14 +12,27 @@ import android.view.KeyEvent
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.FrameLayout
+import android.webkit.ValueCallback
 import android.widget.ImageButton
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import java.net.Socket
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private val handler = Handler(Looper.getMainLooper())
+
+    /** 未消费的图片选择回调，WebView 同一时刻只允许一个，需显式取消旧调用避免泄漏。 */
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    private val pickImageLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        val cb = fileChooserCallback
+        fileChooserCallback = null
+        // 单选回传数组，用户取消回传 null 避免卡死
+        cb?.onReceiveValue(uri?.let { arrayOf(it) })
+    }
 
     inner class AndroidBridge {
         @JavascriptInterface
@@ -67,16 +80,35 @@ class MainActivity : AppCompatActivity() {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                allowFileAccess = true
-                allowContentAccess = true
-                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                allowFileAccess = false
+                allowContentAccess = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 cacheMode = WebSettings.LOAD_NO_CACHE
             }
             clearCache(true)
             addJavascriptInterface(AndroidBridge(), "AndroidBridge")
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    if (filePathCallback == null) return false
+                    // 取消上一次未消费的回调，防止 input 状态卡死
+                    fileChooserCallback?.onReceiveValue(null)
+                    fileChooserCallback = filePathCallback
+                    return try {
+                        pickImageLauncher.launch("image/*")
+                        true
+                    } catch (e: Exception) {
+                        fileChooserCallback = null
+                        filePathCallback.onReceiveValue(null)
+                        false
+                    }
+                }
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val url = request?.url?.toString() ?: return false
@@ -210,8 +242,17 @@ class MainActivity : AppCompatActivity() {
                 handler.post { loginView.loadUrl(target) }
             }
         } else {
-            // 验证页不清 Cookie：需要沿用当前扫码会话的登录态
-            loginView.loadUrl(target)
+            // 验证页：先清掉 WebView 里上一个账号的残留，再把扫码会话（OkHttp CookieJar）
+            // 里的 cookie 注入进来，验证页才能接上扫码登录态。
+            val qrCookies = QrLoginService.pendingVerificationCookies
+            cm.removeAllCookies {
+                for (c in qrCookies) {
+                    val domain = c.domain.trimStart('.')
+                    cm.setCookie("https://$domain", c.toString())
+                }
+                cm.flush()
+                handler.post { loginView.loadUrl(target) }
+            }
         }
 
         handler.postDelayed(poller, 1500L)
@@ -233,13 +274,14 @@ class MainActivity : AppCompatActivity() {
      * 这里改为直接调前端真实的 loadAccounts() / loadStats()，并兼容自定义事件。
      */
     private fun notifyFrontendLoginSuccess(nick: String) {
-        val safeNick = nick.replace("\\", "\\\\").replace("'", "\\'")
+        // JSON 字面量：同时处理引号、反斜杠、换行与 U+2028 等
+        val nickLiteral = org.json.JSONObject.quote(nick)
         val js = """
             (function(){
               try {
                 if (typeof loadAccounts === 'function') loadAccounts();
                 if (typeof loadStats === 'function') loadStats();
-                window.dispatchEvent(new CustomEvent('xianyu-login-success', {detail:{nick:'$safeNick'}}));
+                window.dispatchEvent(new CustomEvent('xianyu-login-success', {detail:{nick:$nickLiteral}}));
               } catch (e) { console.warn('refresh failed', e); }
             })();
         """.trimIndent()
@@ -253,17 +295,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun waitForServerAndLoad() {
         Thread {
-            for (i in 1..30) {
-                try {
-                    val s = Socket("127.0.0.1", 9005)
-                    s.close()
-                    break
-                } catch (e: Exception) {
-                    Thread.sleep(150)
-                }
+            // 只认本进程内 LocalServer 真正绑定成功；仅「端口能连上」不够，
+            // 端口可能被其它 App 抢占，加载它的页面会把 AndroidBridge 暴露出去。
+            var ok = false
+            for (i in 1..40) {
+                if (LocalServer.current()?.listening == true) { ok = true; break }
+                Thread.sleep(150)
             }
             handler.post {
-                webView.loadUrl("http://127.0.0.1:9005/")
+                if (ok) {
+                    webView.loadUrl("http://127.0.0.1:9005/")
+                } else {
+                    toast("本地服务启动失败：9005 端口可能被其它应用占用，请重启手机后再试")
+                }
             }
         }.start()
     }
@@ -283,6 +327,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        fileChooserCallback?.onReceiveValue(null)
+        fileChooserCallback = null
         webView.destroy()
     }
 }

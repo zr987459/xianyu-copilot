@@ -61,6 +61,8 @@ main{padding:12px 14px 0}
 .ai .n{font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:5px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bg{font-size:9.5px;padding:1.5px 7px;border-radius:20px;font-weight:700;background:#e7f8ec;color:var(--ok);flex:none}
+.bg.warn{background:#fff1e8;color:var(--brand)}
+.bg.err{background:#feeceb;color:var(--err)}
 .ai .m{font-size:10.5px;color:var(--sub);margin-top:2px}
 .daemon{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border-radius:12px;
   background:linear-gradient(135deg,#22252e,#343846);color:#fff;margin-bottom:10px}
@@ -130,6 +132,18 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
 .chip.ok{background:#e7f8ec;color:var(--ok)}
 .chip.err{background:#fdecec;color:var(--err)}
 .chip.warn{background:#fef3e2;color:var(--warn)}
+.img-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+.img-box{position:relative;width:100%;aspect-ratio:1;border-radius:8px;overflow:hidden;background:#f0f2f5;border:1px solid var(--border)}
+.img-box img{width:100%;height:100%;object-fit:cover;display:block}
+.img-box .del{position:absolute;top:2px;right:2px;background:rgba(0,0,0,0.65);color:#fff;border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:11px;cursor:pointer}
+.img-add{aspect-ratio:1;border:1.5px dashed var(--border);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;background:#fafbfc;color:var(--sub);font-size:10.5px;gap:3px}
+.img-add svg{width:20px;height:20px;color:var(--sub)}
+.pub-item{display:flex;gap:11px;padding:12px;background:#fff;border:1px solid var(--border);border-radius:12px;margin-bottom:8px;align-items:center}
+.pub-item .pic{width:56px;height:56px;border-radius:8px;object-fit:cover;background:#f0f2f5;flex:none}
+.pub-item .info{flex:1;min-width:0}
+.pub-item .title{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px}
+.pub-item .meta{display:flex;justify-content:space-between;align-items:center;font-size:11px}
+.pub-item .price{color:var(--brand);font-weight:700;font-size:13.5px}
 </style>
 </head>
 <body>
@@ -275,17 +289,34 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
   <div class="sec">
     <div class="st"><span class="l">🚀 免浏览器一键上架</span></div>
     <div class="card">
+      <span class="lbl">商品图片（点击上传，第一张为主图）</span>
+      <div class="img-grid" id="pubImgGrid">
+        <div class="img-add" onclick="chooseImages()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          <span>选图</span>
+        </div>
+      </div>
+      <input type="file" id="pubFileInput" accept="image/*" style="display:none" onchange="onImageChosen(this.files)">
+
       <span class="lbl">商品标题</span>
       <input class="fld" id="pTitle" placeholder="例如：视频会员月卡 独享" style="margin-bottom:9px">
       <span class="lbl">售价（元）</span>
       <input class="fld" id="pPrice" type="number" step="0.01" placeholder="9.90" style="margin-bottom:9px">
       <span class="lbl">商品描述</span>
       <textarea class="fld" id="pDesc" rows="4" placeholder="自动发货，拍下即发~"></textarea>
-      <button class="btn full" style="margin-top:11px" onclick="publishItem()">立即发布上架</button>
+      <button class="btn full" style="margin-top:11px" id="pBtn" onclick="publishItem()">立即发布上架</button>
       <p style="font-size:10.5px;color:var(--sub);margin-top:9px;line-height:1.6">
-        说明：发布功能依赖闲鱼官方上架接口，需已登录有效账号。
+        说明：支持拍照或相册选图直接上传到闲鱼官方图床，发布需已绑定有效账号。
       </p>
     </div>
+  </div>
+
+  <div class="sec">
+    <div class="st">
+      <span class="l">🛍️ 在售宝贝 (<span id="pubCount">0</span> 件)</span>
+      <span class="r"><button class="btn sm gray" onclick="loadPublishedItems()">刷新在售</button></span>
+    </div>
+    <div id="pubItemList"><div class="empty">加载中…</div></div>
   </div>
 </div>
 
@@ -427,6 +458,7 @@ function go(p){
   if(p === 'cards'){ loadCards(); loadStock(); }
   if(p === 'rules'){ loadRules(); }
   if(p === 'acc'){ loadAccounts(); }
+  if(p === 'pub'){ loadPublishedItems(); }
 }
 
 function refreshAll(){
@@ -437,6 +469,7 @@ function refreshAll(){
     var id = cur.id;
     if(id === 'pane-cards'){ loadCards(); loadStock(); }
     if(id === 'pane-rules'){ loadRules(); }
+    if(id === 'pane-pub'){ loadPublishedItems(); }
   }
 }
 
@@ -496,9 +529,15 @@ function loadOrders(){
           '<span>规格：<b>' + esc(o.sku || '默认') + '</b></span>' +
           '<span>件数：<b>' + (o.quantity || 1) + ' 件</b></span>' +
         '</div>' +
-        '<button class="btn full" onclick="shipNow(this,\'' + esc(o.orderId) + '\',\'' +
-           esc((o.title||'').replace(/'/g,'')) + '\',\'' + esc((o.sku||'').replace(/'/g,'')) + '\',' +
-           (o.quantity || 1) + ')">立即发货</button>' +
+        '<div style="margin:8px 0 10px;padding:8px 10px;background:#f8f9fb;border-radius:8px;font-size:11.5px;color:var(--text);line-height:1.7">' +
+          '<div>👤 买家：<b>' + esc(o.buyer || '-') + '</b>' + (o.buyerCity ? ' <span style="color:var(--sub);font-size:10.5px">📍 ' + esc(o.buyerCity) + '</span>' : '') + '</div>' +
+          (o.price ? '<div>💰 实付：<b style="color:var(--brand)">¥ ' + esc(o.price) + '</b></div>' : '') +
+          (o.createTime ? '<div>🕒 下单时间：<span style="color:var(--sub)">' + esc(o.createTime) + '</span></div>' : '') +
+          (o.buyerMessage ? '<div style="color:var(--brand);margin-top:2px">💬 留言：' + esc(o.buyerMessage) + '</div>' : '') +
+        '</div>' +
+        '<button class="btn full" onclick="shipNow(this,' + esc(JSON.stringify(String(o.orderId||''))) + ',' +
+           esc(JSON.stringify(String(o.title||''))) + ',' + esc(JSON.stringify(String(o.sku||''))) + ',' +
+           (parseInt(o.quantity, 10) || 1) + ')">立即发货</button>' +
       '</div>';
     }
     box.innerHTML = html;
@@ -689,13 +728,16 @@ function loadAccounts(){
 
     // 当前账号
     var cur = null;
-    for(var i=0;i<list.length;i++){ if(list[i].isActive || list[i].id == activeId) cur = list[i]; }
+    for(var i=0;i<list.length;i++){ if(list[i].isActive || (activeId > 0 && list[i].id == activeId)) cur = list[i]; }
     if(cur){
+      var isExp = cur.status === 'EXPIRED';
+      var bgCls = isExp ? 'bg err' : 'bg';
+      var bgTxt = isExp ? '需重新登录' : '在线';
       $('#curAcc').innerHTML =
         '<div style="display:flex;align-items:center;gap:11px">' +
           '<div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>' +
           '<div class="ai"><div class="n">' + esc(cur.nick || '闲鱼用户') +
-          ' <span class="bg">' + esc(cur.status || '在线') + '</span></div>' +
+          ' <span class="' + bgCls + '">' + bgTxt + '</span></div>' +
           '<div class="m">UID: ' + esc(cur.userId || '-') + '</div></div>' +
         '</div>';
     } else {
@@ -888,36 +930,207 @@ function submitCookie(){
   api('/api/accounts/import_cookie', { method:'POST', body:{ cookie: ck } }).then(function(d){
     btn.disabled = false;
     btn.textContent = '验证并保存';
-    if(d.valid){
-      toast('登录成功：' + (d.nick || ''));
-      closeCookie();
-      loadAccounts(); loadStats();
-    } else {
-      toast(d.message || 'Cookie 可能已失效，已保存但需注意');
-      closeCookie();
-      loadAccounts();
-    }
+    toast('登录成功：' + (d.nick || ''));
+    closeCookie();
+    loadAccounts(); loadStats();
   }).catch(function(e){
     btn.disabled = false;
     btn.textContent = '验证并保存';
-    toast('导入失败: ' + e.message);
+    toast(e.message || '导入异常');
+    // 如果提示已保存，自动关闭弹窗并刷新账号列表
+    if(e.message && e.message.indexOf('已保存') !== -1){
+      closeCookie();
+    }
+    loadAccounts(); loadStats();
   });
 }
 
 /* ---------- 上架 ---------- */
+var uploadedImages = []; // [{url, width, height}]
+
+function chooseImages(){
+  var inp = $('#pubFileInput');
+  if(inp) inp.click();
+}
+
+function compressImage(file){
+  return new Promise(function(resolve, reject){
+    var img = new Image();
+    var url = URL.createObjectURL(file);
+    img.onload = function(){
+      URL.revokeObjectURL(url);
+      var MAX = 1400;
+      var w = img.naturalWidth || img.width || 800;
+      var h = img.naturalHeight || img.height || 800;
+      var scale = Math.min(1, MAX / Math.max(w, h));
+      var dw = Math.round(w * scale);
+      var dh = Math.round(h * scale);
+      var cvs = document.createElement('canvas');
+      cvs.width = dw; cvs.height = dh;
+      var ctx = cvs.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, dw, dh);
+      ctx.drawImage(img, 0, 0, dw, dh);
+      try {
+        var dataUrl = cvs.toDataURL('image/jpeg', 0.85);
+        resolve({ dataUrl: dataUrl, width: dw, height: dh });
+      } catch(e){ reject(e); }
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('图片解析失败')); };
+    img.src = url;
+  });
+}
+
+function onImageChosen(files){
+  var inp = $('#pubFileInput');
+  if(!files || !files.length){ if(inp) inp.value = ''; return; }
+  var file = files[0];
+  var jpgName = (file.name || 'img').replace(/\.[^.]+$/, '') + '.jpg';
+  toast('正在压缩处理图片…', 1500);
+  compressImage(file).then(function(res){
+    toast('正在直传到闲鱼图床…', 4000);
+    return api('/api/publish/upload_image', {
+      method: 'POST',
+      body: { image: res.dataUrl, filename: jpgName, width: res.width, height: res.height }
+    }).then(function(d){
+      uploadedImages.push({ url: d.url, width: d.width || res.width, height: d.height || res.height });
+      renderUploadGrid();
+      toast('图片上传成功！');
+    });
+  }).catch(function(err){
+    toast('上传失败: ' + err.message);
+  }).then(function(){ if(inp) inp.value = ''; });
+}
+
+function removeUploadedImage(idx){
+  uploadedImages.splice(idx, 1);
+  renderUploadGrid();
+}
+
+function renderUploadGrid(){
+  var grid = $('#pubImgGrid');
+  if(!grid) return;
+  var html = '';
+  for(var i=0;i<uploadedImages.length;i++){
+    var img = uploadedImages[i];
+    html += '<div class="img-box">' +
+      '<img src="' + esc(img.url) + '">' +
+      '<div class="del" onclick="removeUploadedImage(' + i + ')">×</div>' +
+    '</div>';
+  }
+  if(uploadedImages.length < 9){
+    html += '<div class="img-add" onclick="chooseImages()">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>' +
+      '<span>选图</span></div>';
+  }
+  grid.innerHTML = html;
+}
+
 function publishItem(){
   var title = $('#pTitle').value.trim();
   var price = $('#pPrice').value.trim();
   var desc = $('#pDesc').value.trim();
+  if(!uploadedImages.length){ toast('请至少上传一张商品主图'); return; }
   if(!title){ toast('请填写商品标题'); return; }
   if(!price){ toast('请填写售价'); return; }
 
-  api('/api/publish/item', { method:'POST', body:{ title:title, price:price, description:desc } })
-    .then(function(d){
-      if(d.ok || d.success){ toast('发布成功'); $('#pTitle').value=''; $('#pPrice').value=''; $('#pDesc').value=''; }
-      else toast('发布失败: ' + (d.message || '未知错误'));
-    })
-    .catch(function(e){ toast('发布异常: ' + e.message); });
+  var btn = $('#pBtn');
+  btn.disabled = true;
+  btn.textContent = '正在发布…';
+
+  api('/api/publish/item', {
+    method:'POST',
+    body:{
+      title: title,
+      price: parseFloat(price) || 0.0,
+      desc: desc,
+      images: uploadedImages
+    }
+  }).then(function(d){
+    btn.disabled = false;
+    btn.textContent = '立即发布上架';
+    toast(d.message || '发布成功！');
+    $('#pTitle').value = '';
+    $('#pPrice').value = '';
+    $('#pDesc').value = '';
+    uploadedImages = [];
+    renderUploadGrid();
+    loadPublishedItems();
+  }).catch(function(e){
+    btn.disabled = false;
+    btn.textContent = '立即发布上架';
+    toast('发布失败: ' + e.message);
+  });
+}
+
+var onSaleSource = '';
+var onSalePage = 1;
+var onSaleTotal = 0;
+var onSaleLoading = false;
+var ON_SALE_PAGE_SIZE = 20;
+
+function renderOnSaleItem(item){
+  var pic = item.imageUrl
+    ? '<img class="pic" src="' + esc(item.imageUrl) + '" onerror="this.style.display=\'none\'">'
+    : '<div class="pic" style="display:grid;place-items:center;color:var(--sub);font-size:10px">无图</div>';
+  return '<div class="pub-item">' + pic +
+    '<div class="info">' +
+      '<div class="title">' + esc(item.title || '-') + '</div>' +
+      '<div class="meta">' +
+        '<span class="price">¥ ' + esc(item.price || '0.00') + '</span>' +
+        '<span class="chip ok">' + esc(item.status || '在售') + '</span>' +
+      '</div>' +
+      '<div style="margin-top:5px">' +
+        '<a class="btn sm gray" style="text-decoration:none;padding:2px 8px;font-size:11px;display:inline-block" href="' + esc(item.detailUrl) + '" target="_blank">在闲鱼查看</a>' +
+      '</div>' +
+    '</div></div>';
+}
+
+function loadPublishedItems(page){
+  page = page || 1;
+  var box = $('#pubItemList');
+  if(!box || onSaleLoading) return;
+  onSaleLoading = true;
+  if(page === 1){
+    onSaleSource = ''; onSaleTotal = 0;
+    box.innerHTML = '<div class="empty">正在获取在售宝贝…</div>';
+  }
+  var more = $('#pubLoadMore');
+  if(more) more.textContent = '加载中…';
+
+  var url = '/api/items/on_sale?page=' + page;
+  if(page > 1 && onSaleSource) url += '&source=' + encodeURIComponent(onSaleSource);
+
+  api(url).then(function(d){
+    if(page === 1) onSaleSource = d.source || '';
+    var list = d.items || [];
+    if(page === 1 && !list.length){
+      box.innerHTML = '<div class="empty">暂无在售宝贝<br><span style="font-size:11px">可以在上方快速上架</span></div>';
+      $('#pubCount').textContent = 0;
+      return;
+    }
+    if(more) more.remove();
+    var html = '';
+    for(var i = 0; i < list.length; i++) html += renderOnSaleItem(list[i]);
+    if(page === 1) box.innerHTML = html; else box.insertAdjacentHTML('beforeend', html);
+
+    onSalePage = page;
+    onSaleTotal += list.length;
+    $('#pubCount').textContent = onSaleTotal;
+
+    if(list.length >= ON_SALE_PAGE_SIZE){
+      box.insertAdjacentHTML('beforeend',
+        '<button id="pubLoadMore" class="btn sm gray" style="width:100%;margin-top:8px" onclick="loadPublishedItems(' + (page + 1) + ')">加载更多</button>');
+    } else if(page > 1){
+      box.insertAdjacentHTML('beforeend', '<div class="empty" style="padding:8px">已经到底了</div>');
+    }
+  }).catch(function(e){
+    if(page === 1){
+      box.innerHTML = '<div class="empty">获取在售宝贝失败<br><span style="font-size:11px">' + esc(e.message) + '</span></div>';
+    } else if(more){
+      more.textContent = '加载失败，点击重试';
+    }
+  }).then(function(){ onSaleLoading = false; });
 }
 
 /* ================= 启动 ================= */

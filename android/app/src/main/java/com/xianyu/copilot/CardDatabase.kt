@@ -229,7 +229,8 @@ class CardDatabase private constructor(context: Context) :
         nick: String,
         avatar: String,
         cookie: String,
-        activate: Boolean
+        activate: Boolean,
+        status: String = "ACTIVE"
     ): Long = synchronized(writeLock) {
         val uid = userId.trim()
         if (uid.isEmpty() || cookie.isBlank()) return -1
@@ -251,7 +252,7 @@ class CardDatabase private constructor(context: Context) :
                 put("nick", nick.orEmpty())
                 put("avatar", avatar.orEmpty())
                 put("cookie", SecureStore.encrypt(cookie))
-                put("status", "ACTIVE")
+                put("status", status)
                 put("updated_at", ts)
                 if (activate) put("is_active", 1)
             }
@@ -304,7 +305,7 @@ class CardDatabase private constructor(context: Context) :
         val sql = """
             SELECT id,user_id,nick,avatar,cookie,is_active,status,updated_at
             FROM $T_ACCOUNTS
-            ORDER BY is_active DESC, updated_at DESC
+            WHERE is_active = 1
             LIMIT 1
         """.trimIndent()
         readableDatabase.rawQuery(sql, null).use { c ->
