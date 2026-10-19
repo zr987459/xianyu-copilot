@@ -59,7 +59,8 @@ object MtopClient {
         val imageUrl: String,
         val status: String,
         val detailUrl: String,
-        val source: String
+        val source: String,
+        val onSale: Boolean = true
     )
 
     /** 上传成功的图片信息。 */
@@ -567,7 +568,7 @@ object MtopClient {
             anySuccess = true
             val items = mapPersonalItems(r.json)
             // 全量兜底时过滤出非在售
-            return if (grouped) items else items.filter { it.status == "在售" }
+            return if (grouped) items else items.filter { it.onSale }
         }
 
         fun tryShop(): List<OnSaleItem>? {
@@ -646,10 +647,11 @@ object MtopClient {
             val picUrl = card.optJSONObject("picInfo")?.optString("url").orEmpty()
                 .ifBlank { card.optJSONObject("picInfo")?.optString("picUrl").orEmpty() }
                 .ifBlank { firstNonBlank(card, "picUrl", "imageUrl", "image", "itemImageUrl", "cover") ?: "" }
+            val isOnSale = card.optInt("itemStatus") == 0
             val status = card.optString("itemStatusDesc").takeIf { it.isNotBlank() && it != "null" }
-                ?: if (card.optInt("itemStatus") == 0) "在售" else "已下架"
+                ?: if (isOnSale) "在售" else "已下架"
             val detailUrl = "https://www.goofish.com/item?id=$id"
-            out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "personal"))
+            out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "personal", isOnSale))
         }
         return out
     }
