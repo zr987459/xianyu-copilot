@@ -407,6 +407,69 @@ class CardDatabase private constructor(context: Context) :
     private fun SQLiteDatabase.queryString(sql: String, vararg args: String): String? =
         rawQuery(sql, args).use { c -> if (c.moveToFirst()) c.getString(0) else null }
 
+    /**
+     * 一单多件与多规格原子出库（参考成熟开源项目）：
+     * 1. 幂等：若同一 orderId 已经出库过，优先返回已有卡密；
+     * 2. 数量补齐：拍 N 件出库 N 张，避免少发或超卖。
+     */
+    /**
+     * 一单多件原子出库。
+     * 返回本次「新」出库的卡密；已出库过的订单不会重复发送（幂等）。
+     */
+    fun claimCardsAtomic(keyword: String, sku: String, orderId: String, quantity: Int = 1): List<String> {
+        val k = keyword.trim()
+        val s = sku.trim()
+        val o = orderId.trim()
+        val qty = quantity.coerceAtLeast(1)
+        if (k.isEmpty() || o.isEmpty()) return emptyList()
+
+        val db = writableDatabase
+        db.beginTransactionNonExclusive()
+        try {
+            // 幂等：该订单已经出过卡密就直接返回空，绝不重复发给买家
+            var existing = 0
+            db.rawQuery("SELECT COUNT(*) FROM $T_CARDS WHERE order_id=?", arrayOf(o)).use { c ->
+                if (c.moveToFirst()) existing = c.getInt(0)
+            }
+            if (existing > 0) {
+                db.setTransactionSuccessful()
+                return emptyList()
+            }
+
+            val candidates = mutableListOf<Long>()
+            val sql = if (s.isNotEmpty()) {
+                "SELECT id FROM $T_CARDS WHERE keyword=? AND sku=? AND is_used=0 ORDER BY id ASC LIMIT $qty"
+            } else {
+                "SELECT id FROM $T_CARDS WHERE keyword=? AND is_used=0 ORDER BY id ASC LIMIT $qty"
+            }
+            val args = if (s.isNotEmpty()) arrayOf(k, s) else arrayOf(k)
+            db.rawQuery(sql, args).use { c ->
+                while (c.moveToNext()) candidates.add(c.getLong(0))
+            }
+
+            val claimed = mutableListOf<String>()
+            for (cid in candidates) {
+                val cv = ContentValues().apply {
+                    put("is_used", 1)
+                    put("order_id", o)
+                    put("used_at", now())
+                }
+                // CAS：只有仍然是未使用的行才能被抢到
+                if (db.update(T_CARDS, cv, "id=? AND is_used=0", arrayOf(cid.toString())) == 1) {
+                    db.queryString("SELECT card_content FROM $T_CARDS WHERE id=?", cid.toString())
+                        ?.let { claimed.add(it) }
+                }
+            }
+
+            db.setTransactionSuccessful()
+            return claimed
+        } catch (_: Exception) {
+            return emptyList()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun claimCardAtomic(keyword: String, sku: String, orderId: String): String? {
         val k = keyword.trim()
         val s = sku.trim()
@@ -617,6 +680,25 @@ class CardDatabase private constructor(context: Context) :
             }
             writableDatabase.insert(T_LOGS, null, cv)
         }
+
+    /** 该订单是否已经成功发过货（用于幂等，避免重复发货）。 */
+    fun hasOrderDelivered(orderId: String): Boolean {
+        val o = orderId.trim()
+        if (o.isEmpty()) return false
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM $T_LOGS WHERE order_id=? AND confirm_status LIKE '%完成%'",
+            arrayOf(o)
+        ).use { c ->
+            if (c.moveToFirst() && c.getInt(0) > 0) return true
+        }
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM $T_CARDS WHERE order_id=?",
+            arrayOf(o)
+        ).use { c ->
+            if (c.moveToFirst() && c.getInt(0) > 0) return true
+        }
+        return false
+    }
 
     fun getLogs(limit: Int): List<DeliveryLog> {
         val lim = if (limit <= 0) 100 else limit
