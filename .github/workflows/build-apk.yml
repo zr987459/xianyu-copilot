@@ -42,6 +42,7 @@ jobs:
           KS_PASS: ${{ secrets.XIANYU_KS_PASS }}
           KEY_PASS: ${{ secrets.XIANYU_KEY_PASS }}
           KS_ALIAS: ${{ secrets.XIANYU_KS_ALIAS }}
+          OLD_KS_B64: ${{ secrets.XIANYU_OLD_KS_B64 }}
         run: |
           set -euo pipefail
           if [ -z "${KS_B64:-}" ]; then
@@ -55,6 +56,10 @@ jobs:
           echo "XIANYU_KS_PASS=${KS_PASS}" >> "$GITHUB_ENV"
           echo "XIANYU_KEY_PASS=${KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
           echo "XIANYU_KS_ALIAS=${KS_ALIAS:-xianyu}" >> "$GITHUB_ENV"
+          if [ -n "${OLD_KS_B64:-}" ]; then
+            echo "$OLD_KS_B64" | base64 -d > "$KS_DIR/old.jks"
+            echo "XIANYU_OLD_KS_PATH=$KS_DIR/old.jks" >> "$GITHUB_ENV"
+          fi
 
       - name: Build Android Release APK
         run: |
@@ -63,9 +68,9 @@ jobs:
           mkdir -p ../dist
           cp app/build/outputs/apk/release/*.apk ../dist/XianyuCopilot-unsigned.apk
 
-      # v3 密钥轮换：v1.2.0 用旧钥签过，直接换新钥老用户会装不上（安卓拒绝覆盖）。
-      # lineage 让 Android 9+ 认「新钥是旧钥的合法继承者」，实现无感覆盖升级。
-      # 注意：旧签名者必须保留 installed-data 能力，否则平台不允许 on-device 轮换升级。
+      # v3 密钥轮换（带双签名者覆盖）：
+      # 当有 lineage 时，旧 signer 签低版本 SDK（保证老系统覆盖），新 signer 签高版本 SDK；
+      # Android 9+ 通过 lineage 认新钥为旧钥的合法继承者，实现无感平滑覆盖升级。
       - name: Sign APK with Key Rotation Lineage
         run: |
           set -euo pipefail
@@ -76,8 +81,10 @@ jobs:
           UNSIGNED=dist/XianyuCopilot-unsigned.apk
           OUT=dist/XianyuCopilot.apk
 
-          if [ -f android/xianyu-lineage.bin ]; then
+          if [ -f android/xianyu-lineage.bin ] && [ -n "${XIANYU_OLD_KS_PATH:-}" ]; then
             $APKSIGNER sign \
+              --ks "$XIANYU_OLD_KS_PATH" --ks-pass "pass:cookiebox123" --ks-key-alias "cookiebox" \
+              --next-signer \
               --ks "$XIANYU_KS_PATH" --ks-pass "pass:$XIANYU_KS_PASS" \
               --ks-key-alias "$XIANYU_KS_ALIAS" --key-pass "pass:$XIANYU_KEY_PASS" \
               --lineage android/xianyu-lineage.bin \
@@ -104,7 +111,7 @@ jobs:
           APKSIGNER="$BT/apksigner"
           [ -x "$APKSIGNER" ] || APKSIGNER="java -jar $BT/lib/apksigner.jar"
           ACTUAL=$($APKSIGNER verify --print-certs dist/XianyuCopilot.apk \
-                   | grep -i "SHA-256" | head -n1 | awk -F': ' '{print $2}' | tr -d ' ')
+                   | grep -i "SHA-256" | head -n1 | awk -F': ' '{print $2}' | tr -d ' ' | tr '[:lower:]' '[:upper:]')
           echo "实际证书 SHA-256: $ACTUAL"
           if [ -n "${EXPECTED_SHA256:-}" ] && [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "::error::签名证书指纹不匹配！预期 $EXPECTED_SHA256，实际 $ACTUAL"
