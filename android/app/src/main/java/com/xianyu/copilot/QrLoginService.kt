@@ -260,8 +260,10 @@ object QrLoginService {
     fun checkQrStatus(sessionId: String): CheckResult {
         val session = sessions[sessionId]
             ?: return CheckResult(Status.ERROR, "登录会话已失效，请刷新二维码")
+        // 修复：前端每 2 秒轮询，但 finishSuccess 里的网络校验常超过 2 秒。
+        // 这里在锁内先判断/占位，避免并发轮询重复走 query.do 导致重复落库。
         if (session.finished) {
-            return CheckResult(Status.EXPIRED, "本次扫码已结束，请刷新二维码")
+            return CheckResult(Status.WAITING, "登录处理中，请稍候…")
         }
         if (System.currentTimeMillis() - session.createdAt > SESSION_TTL_MS) {
             releaseSession(sessionId)
@@ -299,15 +301,22 @@ object QrLoginService {
                         CheckResult(Status.EXPIRED, "二维码已过期，请刷新")
                     }
                     "CONFIRMED" -> {
-                        // 风控二次验证：此时还拿不到可用的 unb
-                        if (data.optBoolean("iframeRedirect")) {
-                            val vUrl = data.optString("iframeRedirectUrl")
+                        // 锁内抢占：只有一个轮询能进入落库流程
+                        synchronized(session) {
+                            if (session.finished) {
+                                return CheckResult(Status.WAITING, "登录处理中，请稍候…")
+                            }
+                            // 风控二次验证：此时还拿不到可用的 unb
+                            if (data.optBoolean("iframeRedirect")) {
+                                val vUrl = data.optString("iframeRedirectUrl")
+                                session.finished = true
+                                return CheckResult(
+                                    Status.VERIFICATION_REQUIRED,
+                                    "触发安全验证，需要完成人脸/滑块验证",
+                                    verificationUrl = vUrl
+                                )
+                            }
                             session.finished = true
-                            return CheckResult(
-                                Status.VERIFICATION_REQUIRED,
-                                "触发安全验证，需要完成人脸/滑块验证",
-                                verificationUrl = vUrl
-                            )
                         }
                         finishSuccess(sessionId, session)
                     }

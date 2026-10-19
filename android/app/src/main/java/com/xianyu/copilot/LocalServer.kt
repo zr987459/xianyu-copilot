@@ -36,9 +36,21 @@ class LocalServer(private val context: Context) {
      * 现在：
      *  - API 请求必须携带 X-Api-Token，否则 401；
      *  - 不再回 CORS 通配头，外部页面无法读取响应；
-     *  - 令牌只注入 App 自己 WebView 启动时的 URL query（同源，前端写入 localStorage）。
+     *  - 校验 Host 头，阻断 DNS rebinding；
+     *  - 令牌既不进 HTML 也不收 query 参数，只通过 AndroidBridge.getApiToken() 交给 App 自己的 WebView。
      */
     val apiToken: String = generateToken()
+
+    init {
+        INSTANCE = this
+    }
+
+    companion object {
+        /** 当前进程内唯一实例，供 AndroidBridge 取令牌。 */
+        @Volatile private var INSTANCE: LocalServer? = null
+
+        fun current(): LocalServer? = INSTANCE
+    }
 
     private fun generateToken(): String {
         val bytes = ByteArray(24)
@@ -241,6 +253,10 @@ class LocalServer(private val context: Context) {
     }
 
     private fun route(req: Request): Response {
+        // 第一道门：Host 头必须是本机地址，阻断 DNS rebinding
+        if (!hasValidHost(req)) {
+            return Response(403, "text/plain", "forbidden".toByteArray(StandardCharsets.UTF_8))
+        }
         if (req.method == "OPTIONS") {
             return Response(204, "text/plain", ByteArray(0))
         }
@@ -256,7 +272,11 @@ class LocalServer(private val context: Context) {
         catch (_: FileNotFoundException) { jsonError(404, "not found") }
     }
 
-    /** 校验请求令牌：支持 X-Api-Token 头、token query、Authorization: Bearer。 */
+    /**
+     * 校验请求令牌：只接受 X-Api-Token 头与 Authorization: Bearer。
+     *
+     * 修复：不再接受 ?token= 查询参数——它会进访问日志、历史记录，容易被旁路泄露。
+     */
     private fun isAuthorized(req: Request): Boolean {
         val fromHeader = req.headers["x-api-token"].orEmpty()
         if (fromHeader.isNotEmpty() && constantTimeEquals(fromHeader, apiToken)) return true
@@ -266,11 +286,23 @@ class LocalServer(private val context: Context) {
             val t = bearer.substring(7).trim()
             if (t.isNotEmpty() && constantTimeEquals(t, apiToken)) return true
         }
-
-        val fromQuery = req.query["token"].orEmpty()
-        if (fromQuery.isNotEmpty() && constantTimeEquals(fromQuery, apiToken)) return true
-
         return false
+    }
+
+    /**
+     * Host 头白名单，防 DNS rebinding。
+     *
+     * 恶意域名解析到 127.0.0.1 后，浏览器会认为它与目标同源；校验 Host 可确保
+     * 只有真正指向本机的请求才被处理。
+     */
+    private fun hasValidHost(req: Request): Boolean {
+        val host = req.headers["host"].orEmpty().trim().lowercase()
+        if (host.isEmpty()) return false
+        return host == "127.0.0.1:$PORT" ||
+            host == "localhost:$PORT" ||
+            host == "[::1]:$PORT" ||
+            host == "127.0.0.1" ||
+            host == "localhost"
     }
 
     private fun constantTimeEquals(a: String, b: String): Boolean {
@@ -662,7 +694,13 @@ class LocalServer(private val context: Context) {
         val db = CardDatabase.get(context)
         val cookie = db.getActiveCookie()
         if (cookie.isBlank()) return jsonOk(JSONObject().put("orders", JSONArray()).put("count", 0))
-        val list = MtopClient.querySoldOrders(cookie)
+        // 令牌过期时自动刷新并回写，避免「打开页面就要求重新登录」
+        val list = MtopClient.querySoldOrders(
+            cookie,
+            onCookieRefreshed = { refreshed ->
+                AccountManager.persistRefreshedCookie(context, refreshed)
+            }
+        )
         val arr = JSONArray()
         for (o in list) {
             val item = JSONObject().apply {
@@ -723,7 +761,12 @@ class LocalServer(private val context: Context) {
             }
         }.trim()
 
-        val (ok, msg) = MtopClient.confirmDummyShipping(cookie, orderId, tradeText)
+        val (ok, msg) = MtopClient.confirmDummyShipping(
+            cookie, orderId, tradeText,
+            onCookieRefreshed = { refreshed ->
+                AccountManager.persistRefreshedCookie(context, refreshed)
+            }
+        )
         db.recordLog(orderId, rule?.keyword ?: "手动发货", content, if (ok) "发货完成" else "发货反馈: $msg")
 
         val out = JSONObject().apply {
@@ -783,9 +826,12 @@ class LocalServer(private val context: Context) {
         o.put("cookie", cookie)
         o.put("nick", nick)
         o.put("hasCookie", cookie.isNotBlank())
-        // 修复：旧版 valid = cookie.isNotBlank() 是假的有效性。
-        // 现在 valid 取决于最近一次真实 mtop 校验结果。
-        val (lastOk, lastTs, lastDetail) = db.getLastCheck()
+        // 修复：旧版 valid = cookie.isNotBlank() 是假的有效性；
+        // 且 last_check 是全局的，切号后显示的是上一个账号的结果。
+        // 现在读「当前激活账号自己」的校验状态。
+        val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
+        val (lastTs, lastOk, lastDetail) =
+            if (unb.isBlank()) Triple(0L, false, "") else db.getAccountCheck(unb)
         val valid = cookie.isNotBlank() && lastOk
         o.put("valid", valid)
         o.put("lastCheckAt", lastTs)
@@ -873,13 +919,9 @@ class LocalServer(private val context: Context) {
         val mime = mimeType(assetPath)
         // 注入访问令牌：仅对 App 自己的 WebView 页面生效（同源）。
         // 外部浏览器访问没有 app 注入令牌也无所谓，但 static 页本身不含敏感数据。
-        if (assetPath.endsWith(".html")) {
-            val html = String(bytes, StandardCharsets.UTF_8).replaceFirst(
-                "</head>",
-                "<script>window.__API_TOKEN__='$apiToken';</script></head>"
-            )
-            return Response(200, mime, html.toByteArray(StandardCharsets.UTF_8))
-        }
+        // 修复：不再把令牌写进 HTML。
+        // 本机任何 App 只要 GET / 就能读到令牌，等于鉴权形同虚设。
+        // 现在令牌只能通过 AndroidBridge.getApiToken() 从 App 自己的 WebView 拿到。
         return Response(200, mime, bytes)
     }
 

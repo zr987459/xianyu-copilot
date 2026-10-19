@@ -78,6 +78,7 @@ object AccountManager {
                 cookie = finalCookie,
                 activate = false
             )
+            db.recordAccountCheck(unb, success = false, detail = check.message)
             return SaveResult(
                 ok = false,
                 nick = parsed["tracknick"] ?: unb,
@@ -99,7 +100,7 @@ object AccountManager {
             cookie = finalCookie,
             activate = activateOnSuccess
         )
-        db.markAccountChecked(unb, success = true, detail = source.label)
+        db.recordAccountCheck(unb, success = true, detail = source.label)
 
         Log.i(TAG, "${source.label} 成功: nick=$nick unb=$unb activated=$activateOnSuccess")
         return SaveResult(
@@ -126,19 +127,20 @@ object AccountManager {
             if (unb.isEmpty()) return
 
             val db = CardDatabase.get(context)
-            val existing = db.getActiveCookie()
-            val finalCookie = if (existing.isBlank()) {
-                unifiedCookie
-            } else {
-                // 以库里最新 cookie 为基准，只覆盖令牌字段
-                val base = MtopSigner.parseCookies(existing)
-                val newTk = incoming["_m_h5_tk"]
-                val newEnc = incoming["_m_h5_tk_enc"]
-                if (newTk.isNullOrEmpty()) return
-                base["_m_h5_tk"] = newTk
-                if (!newEnc.isNullOrEmpty()) base["_m_h5_tk_enc"] = newEnc
-                MtopSigner.rebuildCookie(base)
+            // 修复串号：以「该账号自己那一行」为基准，不拿 active 账号的 cookie 来合
+            val existing = db.getAccountCookie(unb)
+            if (existing.isEmpty()) {
+                // 账号尚未入库（登录中），不动库，避免误写 active 行
+                Log.d(TAG, "persistRefreshedCookie: 账号 $unb 尚未入库，跳过")
+                return
             }
+            val base = MtopSigner.parseCookies(existing)
+            val newTk = incoming["_m_h5_tk"]
+            val newEnc = incoming["_m_h5_tk_enc"]
+            if (newTk.isNullOrEmpty()) return
+            base["_m_h5_tk"] = newTk
+            if (!newEnc.isNullOrEmpty()) base["_m_h5_tk_enc"] = newEnc
+            val finalCookie = MtopSigner.rebuildCookie(base)
             if (finalCookie == existing) return
             db.updateAccountCookie(unb, finalCookie)
             Log.i(TAG, "已回写刷新后的令牌: unb=$unb")

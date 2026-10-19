@@ -125,13 +125,26 @@ class DaemonService : Service() {
      * Cookie 失效时主动提醒。
      * 修复：旧版守护层 cookie 过期只是静默 return，用户完全不知道已停止发货。
      */
-    private fun notifyIfCookieBroken(db: CardDatabase, cookie: String) {
+    /**
+     * Cookie 失效时主动提醒。
+     *
+     * 修复：旧版读的是全局 last_check（只在登录成功时写过一次 success=true），
+     * 所以永远不会报警。现在按当前激活账号读取它自己的校验状态。
+     */
+    private fun notifyIfCookieBroken(db: CardDatabase) {
         val now = System.currentTimeMillis()
         if (now - lastCookieCheckAt < COOKIE_CHECK_INTERVAL_MS) return
         lastCookieCheckAt = now
 
-        val (lastOk, _, detail) = db.getLastCheck()
-        if (lastOk) {
+        val active = db.getActiveCookie()
+        val unb = MtopSigner.parseCookies(active)["unb"].orEmpty()
+        if (unb.isBlank()) return
+
+        val (checkedAt, ok, detail) = db.getAccountCheck(unb)
+        // 从未校验过（刚升级/刚添加）不误报
+        if (checkedAt == 0L) return
+
+        if (ok) {
             if (cookieAlerted) {
                 cookieAlerted = false
                 updateNotification("闲鱼管家正在守护中 · 自动发货就绪")
@@ -140,8 +153,8 @@ class DaemonService : Service() {
         }
         if (!cookieAlerted) {
             cookieAlerted = true
-            updateNotification("⚠️ 账号可能已失效，请打开 App 重新登录")
-            Log.w(TAG, "active cookie looks invalid: $detail")
+            updateNotification("⚠️ 账号已失效，请打开 App 重新登录")
+            Log.w(TAG, "active account $unb invalid: $detail")
         }
     }
 
@@ -167,21 +180,41 @@ class DaemonService : Service() {
         val enabled = db.getSetting("daemon_enabled", "true") == "true"
         if (!enabled) return@withLock
 
-        val cookie = db.getActiveCookie()
-        if (cookie.isBlank()) return@withLock
+        var cookie = db.getActiveCookie()
+        if (cookie.isBlank()) {
+            notifyIfCookieBroken(db)
+            return@withLock
+        }
+        val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
 
-        // 守护层不允许静默失败：cookie 失效时主动告知用户
-        notifyIfCookieBroken(db, cookie)
+        // 每次调用的真实结果都写回该账号的健康状态，失效提醒才有依据
+        val recordResult: (Boolean, String) -> Unit = { ok, ret ->
+            if (unb.isNotBlank()) db.recordAccountCheck(unb, ok, ret)
+        }
 
         val orders = try {
             // 令牌过期时自动刷新 _m_h5_tk 并回写数据库，避免「跑几小时就失效」
-            MtopClient.querySoldOrders(cookie) { refreshed ->
-                AccountManager.persistRefreshedCookie(applicationContext, refreshed)
-            }
+            MtopClient.querySoldOrders(
+                cookie,
+                onCookieRefreshed = { refreshed ->
+                    AccountManager.persistRefreshedCookie(applicationContext, refreshed)
+                },
+                onResult = recordResult
+            )
         } catch (e: Exception) {
             Log.w(TAG, "querySoldOrders failed", e)
+            if (unb.isNotBlank()) db.recordAccountCheck(unb, false, e.message ?: "异常")
+            notifyIfCookieBroken(db)
             return@withLock
         }
+
+        // 修复：querySoldOrders 期间可能已刷新令牌，后面的发货必须用最新 cookie，
+        // 否则每单都要先撞一次过期再重试。
+        if (unb.isNotBlank()) {
+            db.getAccountCookie(unb).takeIf { it.isNotBlank() }?.let { cookie = it }
+        }
+
+        notifyIfCookieBroken(db)
 
         if (orders.isEmpty()) return@withLock
 
@@ -208,10 +241,12 @@ class DaemonService : Service() {
                 }.trim()
 
                 val (ok, msg) = MtopClient.confirmDummyShipping(
-                    cookie, order.orderId, rule.tradeText
-                ) { refreshed ->
-                    AccountManager.persistRefreshedCookie(applicationContext, refreshed)
-                }
+                    cookie, order.orderId, rule.tradeText,
+                    onCookieRefreshed = { refreshed ->
+                        AccountManager.persistRefreshedCookie(applicationContext, refreshed)
+                    },
+                    onResult = recordResult
+                )
                 db.recordLog(order.orderId, rule.keyword, content, if (ok) "自动发货完成" else "发货反馈: $msg")
                 handled++
             }.onFailure {

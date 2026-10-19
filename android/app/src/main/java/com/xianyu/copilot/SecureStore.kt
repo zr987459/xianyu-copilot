@@ -56,7 +56,11 @@ object SecureStore {
         if (stored.isNullOrEmpty()) return ""
         if (!stored.startsWith(PREFIX)) return stored
         return try {
-            val key = getOrCreateKey() ?: return stored
+            // Keystore 不可用 ⇒ 无法解密，返回空串（绝不把密文当 Cookie 用）
+            val key = getOrCreateKey() ?: run {
+                Log.e(TAG, "Keystore 不可用，无法解密账号凭据")
+                return ""
+            }
             val packed = Base64.decode(stored.removePrefix(PREFIX), Base64.NO_WRAP)
             if (packed.size <= IV_BYTES) return ""
             val iv = packed.copyOfRange(0, IV_BYTES)
@@ -65,9 +69,11 @@ object SecureStore {
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
             String(cipher.doFinal(ct), Charsets.UTF_8)
         } catch (e: Exception) {
-            // 密钥失效 / 换机恢复备份：返回原文，避免数据凭空丢失
-            Log.w(TAG, "decrypt failed, return raw", e)
-            stored
+            // 密钥失效 / 换机恢复备份。
+            // 修复：旧实现返回密文原文，会被当成 Cookie 发出去，hasCookie 也显示为 true。
+            // 现在返回空串，上层据此判定「需重新登录」。
+            Log.w(TAG, "decrypt failed, treat as empty", e)
+            ""
         }
     }
 

@@ -28,6 +28,21 @@ class MainActivity : AppCompatActivity() {
                 showWebLoginDialog()
             }
         }
+
+        /**
+         * 访问令牌只交给 App 自己的 WebView，不再写进 HTML。
+         * 否则本机任意 App GET / 就能把令牌读走，鉴权形同虚设。
+         */
+        @JavascriptInterface
+        fun getApiToken(): String = LocalServer.current()?.apiToken.orEmpty()
+
+        /** 安全验证：在 App 内打开闲鱼的风控验证页，完成后复用网页登录的抓 Cookie 逻辑。 */
+        @JavascriptInterface
+        fun openVerification(url: String) {
+            handler.post {
+                showWebLoginDialog(overrideUrl = url.ifBlank { null })
+            }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -84,7 +99,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun showWebLoginDialog() {
+    /**
+     * App 内网页登录。
+     *
+     * @param overrideUrl 非空时直接打开该地址（用于风控验证页），验证完成后
+     *                    复用同一套抓 Cookie + saveLogin 逻辑。
+     */
+    private fun showWebLoginDialog(overrideUrl: String? = null) {
         val dialog = Dialog(this, android.R.style.Theme_DeviceDefault_Light_NoActionBar_Fullscreen)
         val root = FrameLayout(this)
         root.layoutParams = ViewGroup.LayoutParams(
@@ -105,67 +126,68 @@ class MainActivity : AppCompatActivity() {
 
         val cm = CookieManager.getInstance()
         cm.setAcceptCookie(true)
-        // 修复：CookieManager 是全局的，登录前必须清空旧 Cookie，
-        // 否则会把上一个账号的 cookie 混进新会话。
-        cm.removeAllCookies(null)
-        cm.flush()
 
         // 修复：onPageFinished 每次导航都会触发，必须只跑一次，
         // 否则会反复起线程写库、反复弹关闭。
         val handled = java.util.concurrent.atomic.AtomicBoolean(false)
-        val visitedGoofish = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        fun collectAndSave() {
+            // 分域收集后按名字去重，goofish 域优先
+            val cGoofish = cm.getCookie("https://www.goofish.com") ?: ""
+            val cTb = cm.getCookie("https://login.taobao.com") ?: ""
+            val cMtb = cm.getCookie("https://m.taobao.com") ?: ""
+            val merged = CookieNormalizer.normalize(cGoofish, cTb, cMtb)
+
+            // 未登录就什么也不做（等用户继续操作）
+            if (!CookieNormalizer.hasCoreTokens(merged)) return
+            if (!handled.compareAndSet(false, true)) return
+
+            Thread {
+                // 统一走 AccountManager（去重、令牌自愈、校验、激活策略）
+                val result = AccountManager.saveLogin(
+                    this@MainActivity,
+                    merged,
+                    AccountManager.Source.WEB
+                )
+                handler.post {
+                    if (result.ok) {
+                        try { dialog.dismiss() } catch (_: Exception) {}
+                        notifyFrontendLoginSuccess(result.nick)
+                    } else {
+                        handled.set(false)
+                        toast("登录未完成：${result.message}")
+                    }
+                }
+            }.start()
+        }
 
         loginView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                val u = url.orEmpty()
                 if (handled.get()) return
-
-                // 首页阶段：只要已经落到 goofish 域，先去访问首页让服务端下发
-                // cookie2 / _m_h5_tk，再回头读 Cookie。
-                if (!visitedGoofish.get()) {
-                    if (isLoginDone(u)) {
-                        visitedGoofish.set(true)
-                        view?.loadUrl("https://www.goofish.com/")
-                    }
-                    return
-                }
-
-                if (!u.contains("goofish.com")) return
-
-                // 修复：分域收集后按名字去重，goofish 域优先
-                val cGoofish = cm.getCookie("https://www.goofish.com") ?: ""
-                val cTb = cm.getCookie("https://login.taobao.com") ?: ""
-                val cMtb = cm.getCookie("https://m.taobao.com") ?: ""
-                val merged = CookieNormalizer.normalize(cGoofish, cTb, cMtb)
-
-                // 未登录就什么也不做（等用户继续操作）
-                if (!CookieNormalizer.hasCoreTokens(merged)) return
-                if (!handled.compareAndSet(false, true)) return
-
-                Thread {
-                    // 修复：统一走 AccountManager（去重、令牌自愈、校验、激活策略）
-                    val result = AccountManager.saveLogin(
-                        this@MainActivity,
-                        merged,
-                        AccountManager.Source.WEB
-                    )
-                    handler.post {
-                        if (result.ok) {
-                            try { dialog.dismiss() } catch (_: Exception) {}
-                            // 修复：前端没有 window.refreshAccounts，改调真实存在的入口
-                            notifyFrontendLoginSuccess(result.nick)
-                        } else {
-                            handled.set(false)
-                            toast("登录未完成：${result.message}")
-                        }
-                    }
-                }.start()
+                val u = url.orEmpty()
+                // 已经是闲鱼/淘宝域就尝试抓一次；抓不到也没关系，下面的轮询会兜住
+                if (isLoginDone(u)) collectAndSave()
             }
         }
 
-        loginView.loadUrl("https://www.goofish.com/")
-        root.addView(loginView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        // 修复：闲鱼网页登录常在弹层/iframe 内完成，不一定触发 onPageFinished，
+        // 所以每 1.5 秒主动轮询一次 CookieManager，拿到直接落库。
+        val poller = object : Runnable {
+            override fun run() {
+                if (handled.get()) return
+                collectAndSave()
+                if (!handled.get() && dialog.isShowing) handler.postDelayed(this, 1500L)
+            }
+        }
+
+        dialog.setOnDismissListener { handler.removeCallbacks(poller) }
+
+        root.addView(
+            loginView,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
 
         // 浮动关闭按钮
         val closeBtn = ImageButton(this).apply {
@@ -174,13 +196,25 @@ class MainActivity : AppCompatActivity() {
             setPadding(24, 24, 24, 24)
             setOnClickListener { dialog.dismiss() }
         }
-        val btnParams = FrameLayout.LayoutParams(120, 120).apply {
-            setMargins(32, 64, 0, 0)
-        }
-        root.addView(closeBtn, btnParams)
+        root.addView(closeBtn, FrameLayout.LayoutParams(120, 120).apply { setMargins(32, 64, 0, 0) })
 
         dialog.setContentView(root)
         dialog.show()
+
+        val target = overrideUrl?.takeIf { it.isNotBlank() } ?: "https://www.goofish.com/"
+        if (overrideUrl.isNullOrBlank()) {
+            // 修复：removeAllCookies 是异步的，必须等清完再 loadUrl，
+            // 否则旧账号 cookie 可能还没清掉就已经开始导航。
+            cm.removeAllCookies {
+                cm.flush()
+                handler.post { loginView.loadUrl(target) }
+            }
+        } else {
+            // 验证页不清 Cookie：需要沿用当前扫码会话的登录态
+            loginView.loadUrl(target)
+        }
+
+        handler.postDelayed(poller, 1500L)
     }
 
     /** 判断当前 URL 是否已完成登录（已跳出登录页并落到闲鱼/淘宝首页）。 */

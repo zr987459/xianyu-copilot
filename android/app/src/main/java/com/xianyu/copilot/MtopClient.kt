@@ -46,7 +46,12 @@ object MtopClient {
 
     // ---------------- 核心请求 ----------------
 
-    private data class ApiResult(val success: Boolean, val message: String, val json: JSONObject?)
+    private data class ApiResult(
+        val success: Boolean,
+        val message: String,
+        val json: JSONObject?,
+        val retCode: String = ""
+    )
 
     /**
      * mtop 令牌过期标志（两种拼写官方都存在）。
@@ -61,6 +66,23 @@ object MtopClient {
 
     private fun isTokenExpired(ret: String): Boolean =
         TOKEN_EXPIRED_MARKERS.any { ret.contains(it) }
+
+    /**
+     * 登录态彻底失效（令牌刷新也救不回来），需要用户重新登录。
+     * 与 isTokenExpired 区分：令牌过期是「可自愈」的，这个是「必须重新登录」。
+     */
+    private val SESSION_DEAD_MARKERS = arrayOf(
+        "FAIL_SYS_SESSION_EXPIRED",
+        "FAIL_SYS_SESSION_EXOIRED",
+        "FAIL_SYS_USER_VALIDATE",
+        "FAIL_SYS_LOGIN",
+        "SESSION_EXPIRED",
+        "请重新登录",
+        "未登录"
+    )
+
+    private fun isSessionDead(ret: String): Boolean =
+        SESSION_DEAD_MARKERS.any { ret.contains(it, ignoreCase = true) }
 
     /**
      * 从响应 Set-Cookie 中提取新令牌并合并回 Cookie 字符串。
@@ -121,13 +143,23 @@ object MtopClient {
         version: String,
         dataObj: JSONObject,
         extraQuery: Map<String, String> = emptyMap(),
-        onCookieRefreshed: ((String) -> Unit)? = null
+        onCookieRefreshed: ((String) -> Unit)? = null,
+        onResult: ((Boolean, String) -> Unit)? = null
     ): ApiResult {
+        val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
+
+        fun finish(success: Boolean, message: String, json: JSONObject?, retCode: String): ApiResult {
+            // 每次调用的最终结果都回调出去，供守护层写账号健康状态
+            onResult?.invoke(success, retCode.ifBlank { message })
+            return ApiResult(success, message, json, retCode)
+        }
+
         val first = callMtopOnce(cookie, api, version, dataObj, extraQuery)
-        if (!first.tokenExpired) return ApiResult(first.success, first.message, first.json)
+        if (!first.tokenExpired) {
+            return finish(first.success, first.message, first.json, first.retCode)
+        }
 
         // 令牌过期 / 为空：在账号锁内完成刷新，避免并发互盖
-        val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
         synchronized(lockFor(unb)) {
             // 拿锁后重新校一下：若别人已刷新，直接用新令牌重签即可
             val baseCookie = currentCookieFor(unb) ?: cookie
@@ -138,16 +170,16 @@ object MtopClient {
                 val retry = callMtopOnce(baseCookie, api, version, dataObj, extraQuery)
                 if (!retry.tokenExpired && retry.success) {
                     onCookieRefreshed?.invoke(baseCookie)
-                    return ApiResult(retry.success, retry.message, retry.json)
+                    return finish(retry.success, retry.message, retry.json, retry.retCode)
                 }
             }
 
             val merged = mergeSetCookie(baseCookie, first.setCookies)
             val newToken = MtopSigner.parseCookies(merged)["_m_h5_tk"]
             if (merged == baseCookie || newToken == oldToken) {
-                // 没拿到新令牌：多半是登录态失效或被风控，交给登录模块处理
-                Log.w(TAG, "callMtop($api) 令牌未更新，登录态可能已失效: ${first.message}")
-                return ApiResult(first.success, first.message, first.json)
+                // 没拿到新令牌：令牌刷新也救不回来 ⇒ 登录态已失效
+                Log.w(TAG, "callMtop($api) 令牌未能刷新，判定登录态失效: ${first.retCode}")
+                return finish(false, first.message, first.json, first.retCode)
             }
 
             Log.i(TAG, "callMtop($api) 令牌已刷新，重签重试一次")
@@ -155,18 +187,25 @@ object MtopClient {
 
             val retry = callMtopOnce(merged, api, version, dataObj, extraQuery)
             if (retry.tokenExpired) {
-                Log.w(TAG, "callMtop($api) 刷新后仍过期，停止重试")
+                Log.w(TAG, "callMtop($api) 刷新后仍过期，判定登录态失效")
+                return finish(false, retry.message, retry.json, retry.retCode)
             }
-            return ApiResult(retry.success, retry.message, retry.json)
+            return finish(retry.success, retry.message, retry.json, retry.retCode)
         }
     }
 
-    /** 从数据库读当前账号的最新 cookie（供并发刷新时重读）。 */
+    /**
+     * 按 unb 读该账号自己的最新 cookie。
+     *
+     * 修复串号：之前直接返回 getActiveCookie()，登录第二个账号时会把
+     * 已激活账号 A 的 cookie 当成 B 的基准。现在只按 user_id 查，
+     * 查不到（登录尚未入库）就返回 null，绝不回退到 active 账号。
+     */
     private fun currentCookieFor(unb: String): String? {
         if (unb.isBlank()) return null
         return runCatching {
             val ctx = QrLoginService.SessionHolder.context ?: return null
-            CardDatabase.get(ctx).getActiveCookie().takeIf { it.isNotBlank() }
+            CardDatabase.get(ctx).getAccountCookie(unb).takeIf { it.isNotBlank() }
         }.getOrNull()
     }
 
@@ -175,7 +214,8 @@ object MtopClient {
         val message: String,
         val json: JSONObject?,
         val tokenExpired: Boolean = false,
-        val setCookies: List<String> = emptyList()
+        val setCookies: List<String> = emptyList(),
+        val retCode: String = ""
     )
 
     private fun callMtopOnce(
@@ -225,10 +265,16 @@ object MtopClient {
                 // 先抓 Set-Cookie：令牌过期时新 _m_h5_tk 就挂在这里
                 val setCookies = resp.headers.values("Set-Cookie")
                 if (!resp.isSuccessful) {
-                    return RawResult(false, "HTTP ${resp.code}", null, setCookies = setCookies)
+                    return RawResult(
+                        false, "HTTP ${resp.code}", null,
+                        setCookies = setCookies, retCode = "HTTP_${resp.code}"
+                    )
                 }
                 val json = runCatching { JSONObject(raw) }.getOrNull()
-                    ?: return RawResult(false, "响应解析失败", null, setCookies = setCookies)
+                    ?: return RawResult(
+                        false, "响应解析失败", null,
+                        setCookies = setCookies, retCode = "PARSE_ERROR"
+                    )
                 val retArr: JSONArray? = json.optJSONArray("ret")
                 val ret0 = retArr?.optString(0).orEmpty()
                 // 成功标志：ret[0] 以 SUCCESS 结尾（如 "SUCCESS::调用成功" / "SUCCESS::SUCCESS"）
@@ -241,7 +287,8 @@ object MtopClient {
                     message = msg,
                     json = json,
                     tokenExpired = isTokenExpired(ret0),
-                    setCookies = setCookies
+                    setCookies = setCookies,
+                    retCode = ret0
                 )
             }
         } catch (e: Exception) {
@@ -263,7 +310,8 @@ object MtopClient {
         cookie: String,
         orderId: String,
         tradeText: String,
-        onCookieRefreshed: ((String) -> Unit)? = null
+        onCookieRefreshed: ((String) -> Unit)? = null,
+        onResult: ((Boolean, String) -> Unit)? = null
     ): Pair<Boolean, String> {
         if (cookie.isBlank()) return false to "Cookie 为空"
         if (orderId.isBlank()) return false to "订单号为空"
@@ -279,7 +327,8 @@ object MtopClient {
                 api = "mtop.taobao.idle.logistic.consign.dummy",
                 version = "1.0",
                 dataObj = data,
-                onCookieRefreshed = onCookieRefreshed
+                onCookieRefreshed = onCookieRefreshed,
+                onResult = onResult
             )
             r.success to r.message
         } catch (e: Exception) {
@@ -350,7 +399,8 @@ object MtopClient {
      */
     fun querySoldOrders(
         cookie: String,
-        onCookieRefreshed: ((String) -> Unit)? = null
+        onCookieRefreshed: ((String) -> Unit)? = null,
+        onResult: ((Boolean, String) -> Unit)? = null
     ): List<SoldOrder> {
         if (cookie.isBlank()) return emptyList()
         val apis = listOf(
@@ -364,7 +414,11 @@ object MtopClient {
                     put("pageSize", 20)
                     put("orderStatus", "WAIT_SELLER_SEND_GOODS")
                 }
-                val r = callMtop(cookie, api, ver, data, onCookieRefreshed = onCookieRefreshed)
+                val r = callMtop(
+                    cookie, api, ver, data,
+                    onCookieRefreshed = onCookieRefreshed,
+                    onResult = onResult
+                )
                 if (!r.success) continue
                 val list = parseOrders(r.json)
                 if (list.isNotEmpty() || r.success) return list

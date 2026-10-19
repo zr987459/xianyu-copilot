@@ -361,13 +361,24 @@ function esc(s){
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+var __apiToken = null;
+function getApiToken(){
+  if(__apiToken) return __apiToken;
+  try {
+    if(window.AndroidBridge && typeof window.AndroidBridge.getApiToken === 'function'){
+      __apiToken = String(window.AndroidBridge.getApiToken() || '');
+    }
+  } catch(e){ __apiToken = null; }
+  return __apiToken || '';
+}
+
 function api(path, opts){
   opts = opts || {};
   var cfg = { method: opts.method || 'GET', headers: {} };
-  // 安全：本地 9005 接口现在需要令牌，令牌由 App 在 HTML 注入
-  if(window.__API_TOKEN__){
-    cfg.headers['X-Api-Token'] = window.__API_TOKEN__;
-  }
+  // 安全：令牌不再写进 HTML（否则本机任意 App GET / 就能读走），
+  // 只能通过 AndroidBridge.getApiToken() 从 App 自己的 WebView 取。
+  var tk = getApiToken();
+  if(tk){ cfg.headers['X-Api-Token'] = tk; }
   if(opts.body != null){
     cfg.method = opts.method || 'POST';
     cfg.headers['Content-Type'] = 'application/json';
@@ -764,9 +775,14 @@ function startQrPoll(token){
   stopQrPoll();
   if(!token) return;
   var ticks = 0;
-  qrTimer = setInterval(function(){
-    ticks++;
-    if(ticks > 100){ stopQrPoll(); $('#qrStat').textContent = '二维码已超时，请点击下方刷新'; return; }
+  // 修复：setInterval 会在上一次请求还没返回时就发下一次，
+  // 服务端落库要 2 秒以上，导致重复轮询/重复落库。改成链式 setTimeout。
+  function next(){
+    if(!qrTimer) return;
+    if(++ticks > 100){ stopQrPoll(); $('#qrStat').textContent = '二维码已超时，请点击下方刷新'; return; }
+    poll();
+  }
+  function poll(){
     api('/api/auth/qrcode/check?sessionId=' + encodeURIComponent(token)).then(function(d){
       var st = String(d.status || '').toLowerCase();
       var code = String(d.statusCode || '').toUpperCase();
@@ -788,10 +804,21 @@ function startQrPoll(token){
         $('#qrStat').className = 'qrstat warn';
         $('#qrStat').textContent = d.message || '需要完成安全验证';
         if(d.verificationUrl){
+          // 修复：原来只显示一段文字链接，手机上没法点。
+          // 改为 App 内直接打开验证页，验证完成后复用网页登录的抓 Cookie 逻辑。
           $('#qrBox').innerHTML = '<div style="font-size:12px;text-align:center;padding:8px">' +
-            '<div>请在浏览器打开链接完成验证：</div>' +
-            '<div style="word-break:break-all;margin-top:8px;color:var(--brand)">' +
+            '<div>需要完成闲鱼安全验证</div>' +
+            '<button class="btn primary" style="margin-top:10px" id="btnVerify">在 App 内验证</button>' +
+            '<div style="word-break:break-all;margin-top:8px;font-size:11px;color:var(--muted)">' +
             esc(d.verificationUrl) + '</div></div>';
+          var vb = document.getElementById('btnVerify');
+          if(vb) vb.onclick = function(){
+            try {
+              if(window.AndroidBridge && typeof window.AndroidBridge.openVerification === 'function'){
+                window.AndroidBridge.openVerification(d.verificationUrl);
+              } else { toast('当前环境不支持，请复制链接到浏览器'); }
+            } catch(e){ toast('打开验证页失败'); }
+          };
         }
       } else if(st === 'error' || code === 'ERROR'){
         // 修复：旧版未知状态/异常全部静默，用户看不到任何失败原因
@@ -803,18 +830,22 @@ function startQrPoll(token){
         $('#qrStat').className = 'qrstat';
         $('#qrStat').textContent = '等待扫码…';
       }
+      // 上一次请求返回后再排下一次，避免并发轮询重复落库
+      if(qrTimer) qrTimer = setTimeout(next, 2000);
     }).catch(function(e){
-      // 修复：.catch 不能为空，否则失败完全不可见
+      // .catch 不能为空，否则失败完全不可见
       stopQrPoll();
       $('#qrStat').className = 'qrstat warn';
       $('#qrStat').textContent = '状态查询失败：' + (e.message || '网络异常');
       toast('扫码状态查询失败: ' + (e.message || '网络异常'));
     });
-  }, 2000);
+  }
+  qrTimer = setTimeout(next, 2000);
 }
 
 function stopQrPoll(){
-  if(qrTimer){ clearInterval(qrTimer); qrTimer = null; }
+  // qrTimer 可能是 setInterval 也可能是链式 setTimeout 的 id，两者都清
+  if(qrTimer){ clearInterval(qrTimer); clearTimeout(qrTimer); qrTimer = null; }
 }
 
 function closeQr(){

@@ -14,7 +14,7 @@ class CardDatabase private constructor(context: Context) :
 
     companion object {
         private const val DB_NAME = "xianyu_copilot.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
 
         private const val T_CARDS = "card_keys"
         private const val T_RULES = "delivery_rules"
@@ -109,6 +109,23 @@ class CardDatabase private constructor(context: Context) :
         if (oldVersion < 2) {
             createAccountsTable(db)
         }
+        // v3: 账号级健康状态（替代全局 last_check_*，修切换账号后显示串味）
+        if (oldVersion < 3) {
+            addColumnIfMissing(db, T_ACCOUNTS, "last_check_at", "INTEGER NOT NULL DEFAULT 0")
+            addColumnIfMissing(db, T_ACCOUNTS, "last_check_msg", "TEXT NOT NULL DEFAULT ''")
+        }
+    }
+
+    /** SQLite 不支持 ADD COLUMN IF NOT EXISTS，先查 pragma 再决定。 */
+    private fun addColumnIfMissing(db: SQLiteDatabase, table: String, column: String, decl: String) {
+        val exists = db.rawQuery("PRAGMA table_info($table)", null).use { c ->
+            var found = false
+            while (c.moveToNext()) {
+                if (c.getString(1).equals(column, ignoreCase = true)) { found = true; break }
+            }
+            found
+        }
+        if (!exists) db.execSQL("ALTER TABLE $table ADD COLUMN $column $decl")
     }
 
     private fun createAccountsTable(db: SQLiteDatabase) {
@@ -122,6 +139,8 @@ class CardDatabase private constructor(context: Context) :
                 cookie TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'ACTIVE',
+                last_check_at INTEGER NOT NULL DEFAULT 0,
+                last_check_msg TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL
             )
             """.trimIndent()
@@ -385,30 +404,61 @@ class CardDatabase private constructor(context: Context) :
     }
 
     /**
-     * 记录最近一次 mtop 校验结果（时间 + 错误码）。
-     * 用于把「账号是否有效」从「cookie 非空」改成真实可信的状态。
+     * 按 userId 读取该账号自己的 Cookie。
+     *
+     * 修复串号 bug：之前一律回退到 getActiveCookie()，登录第二个账号时
+     * 会把已激活账号 A 的 cookie 当成 B 的基准，导致 A 的 cookie 和昵称被写进 B 那一行。
+     * 这里只按 user_id 精确查，查不到就返回空串——绝不回退到 active 账号。
      */
-    fun markAccountChecked(userId: String, success: Boolean, detail: String = "") = synchronized(writeLock) {
+    fun getAccountCookie(userId: String): String = synchronized(writeLock) {
         val uid = userId.trim()
-        if (uid.isEmpty()) return@synchronized
-        val ts = now()
-        val status = if (success) "ACTIVE" else "EXPIRED"
-        val cv = ContentValues().apply {
-            put("status", status)
-            put("updated_at", ts)
+        if (uid.isEmpty()) return ""
+        readableDatabase.rawQuery(
+            "SELECT cookie FROM $T_ACCOUNTS WHERE user_id=? LIMIT 1",
+            arrayOf(uid)
+        ).use { c ->
+            if (c.moveToFirst()) SecureStore.decrypt(c.getString(0)).orEmpty() else ""
         }
-        writableDatabase.update(T_ACCOUNTS, cv, "user_id=?", arrayOf(uid))
-        saveSetting("last_check_at", ts.toString())
-        saveSetting("last_check_ok", if (success) "1" else "0")
-        if (detail.isNotBlank()) saveSetting("last_check_detail", detail)
     }
 
-    /** 最近一次校验信息：(是否成功, 时间戳, 说明)。 */
-    fun getLastCheck(): Triple<Boolean, Long, String> {
-        val ok = getSetting("last_check_ok", "") == "1"
-        val ts = getSetting("last_check_at", "0").toLongOrNull() ?: 0L
-        val detail = getSetting("last_check_detail", "")
-        return Triple(ok, ts, detail)
+    /** 按 userId 读取账号状态（ACTIVE / EXPIRED 等）。 */
+    fun getAccountStatus(userId: String): String = synchronized(writeLock) {
+        val uid = userId.trim()
+        if (uid.isEmpty()) return ""
+        readableDatabase.rawQuery(
+            "SELECT status FROM $T_ACCOUNTS WHERE user_id=? LIMIT 1",
+            arrayOf(uid)
+        ).use { c -> if (c.moveToFirst()) c.getString(0).orEmpty() else "" }
+    }
+
+    /**
+     * 记录某账号最近一次 mtop 校验结果。
+     * 改为按账号存进 accounts 表，不再用全局 app_settings（否则切号后显示上一个账号的结果）。
+     */
+    fun recordAccountCheck(userId: String, success: Boolean, detail: String = "") = synchronized(writeLock) {
+        val uid = userId.trim()
+        if (uid.isEmpty()) return@synchronized
+        val cv = ContentValues().apply {
+            put("status", if (success) "ACTIVE" else "EXPIRED")
+            put("last_check_at", now())
+            put("last_check_msg", detail.orEmpty())
+            put("updated_at", now())
+        }
+        writableDatabase.update(T_ACCOUNTS, cv, "user_id=?", arrayOf(uid))
+    }
+
+    /** 某账号最近校验：(时间戳, 是否成功, 说明)。 */
+    fun getAccountCheck(userId: String): Triple<Long, Boolean, String> = synchronized(writeLock) {
+        val uid = userId.trim()
+        if (uid.isEmpty()) return Triple(0L, false, "")
+        readableDatabase.rawQuery(
+            "SELECT last_check_at,status,last_check_msg FROM $T_ACCOUNTS WHERE user_id=? LIMIT 1",
+            arrayOf(uid)
+        ).use { c ->
+            if (c.moveToFirst()) {
+                Triple(c.getLong(0), c.getString(1) == "ACTIVE", c.getString(2).orEmpty())
+            } else Triple(0L, false, "")
+        }
     }
 
     /** 更新账号状态（如 ACTIVE / EXPIRED 等）。 */
