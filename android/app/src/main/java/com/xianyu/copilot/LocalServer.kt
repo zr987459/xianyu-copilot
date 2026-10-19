@@ -821,15 +821,22 @@ class LocalServer(private val context: Context) {
         val cookie = db.getActiveCookie()
         if (cookie.isBlank()) return jsonOk(JSONObject().put("items", JSONArray()).put("count", 0))
         val page = query["page"]?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-        val (ok, list) = MtopClient.queryOnSaleItems(
+        val src = query["source"]?.takeIf { it in setOf("personal", "shop", "all") && page > 1 }
+        val res = MtopClient.queryOnSaleItems(
             cookie = cookie,
             page = page,
+            source = src,
             onCookieRefreshed = { refreshed ->
                 AccountManager.persistRefreshedCookie(context, refreshed)
             }
         )
+        if (!res.ok) {
+            val status = if (MtopClient.isRiskControlPublic(res.error)) 429 else 400
+            val msg = if (res.error.isBlank()) "获取在售宝贝失败，请检查账号状态或网络" else "获取在售宝贝失败: ${res.error}"
+            return jsonError(status, msg)
+        }
         val arr = JSONArray()
-        for (it in list) {
+        for (it in res.items) {
             arr.put(JSONObject().apply {
                 put("id", it.id)
                 put("title", it.title)
@@ -840,10 +847,7 @@ class LocalServer(private val context: Context) {
                 put("source", it.source)
             })
         }
-        if (!ok && arr.length() == 0) {
-            return jsonError(400, "获取在售宝贝失败，请检查账号是否有效或网络连接")
-        }
-        return jsonOk(JSONObject().put("items", arr).put("count", arr.length()).put("ok", true))
+        return jsonOk(JSONObject().put("items", arr).put("count", arr.length()).put("source", res.source).put("ok", true))
     }
 
     private fun apiUploadImage(body: String): Response {

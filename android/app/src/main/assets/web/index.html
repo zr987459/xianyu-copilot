@@ -1063,11 +1063,16 @@ function publishItem(){
   });
 }
 
-function loadPublishedItems(){
+var onSaleSource = '';
+function loadPublishedItems(page){
+  page = page || 1;
   var box = $('#pubItemList');
   if(!box) return;
-  box.innerHTML = '<div class="empty">正在获取在售宝贝…</div>';
-  api('/api/items/on_sale').then(function(d){
+  if(page === 1) box.innerHTML = '<div class="empty">正在获取在售宝贝…</div>';
+  var url = '/api/items/on_sale?page=' + page;
+  if(page > 1 && onSaleSource) url += '&source=' + encodeURIComponent(onSaleSource);
+  api(url).then(function(d){
+    if(page === 1) onSaleSource = d.source || '';
     var list = d.items || [];
     $('#pubCount').textContent = list.length;
     if(!list.length){

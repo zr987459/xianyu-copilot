@@ -69,6 +69,14 @@ object MtopClient {
         val heightSize: Int = 800
     )
 
+    /** 在售商品查询结果封装。 */
+    data class OnSaleResult(
+        val ok: Boolean,
+        val items: List<OnSaleItem>,
+        val source: String,
+        val error: String = ""
+    )
+
     // ---------------- 核心请求 ----------------
 
     private data class ApiResult(
@@ -514,106 +522,107 @@ object MtopClient {
 
     // ==================== 在售商品列表 ====================
 
+    fun isRiskControlPublic(m: String): Boolean = isRiskControl(m)
+
     /**
-     * 查询在售商品列表（个人版优先，明确报错且非风控才回退鱼小铺）。
+     * 查询在售商品列表（采纳 Hark 审查死角补丁：第1页探测锁定源，翻页不跨源串台）。
      */
     fun queryOnSaleItems(
         cookie: String,
         page: Int = 1,
         pageSize: Int = 20,
+        source: String? = null,
         onCookieRefreshed: ((String) -> Unit)? = null,
         onResult: ((Boolean, String) -> Unit)? = null
-    ): Pair<Boolean, List<OnSaleItem>> {
-        if (cookie.isBlank()) return false to emptyList()
+    ): OnSaleResult {
+        if (cookie.isBlank()) return OnSaleResult(false, emptyList(), "", "未绑定账号")
         val userId = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
+        var anySuccess = false
+        var lastErr = ""
 
-        // 1) 个人版查询：彻底移除硬编码 groupId（之前写死 58877261 导致非该分组宝贝全部查不到）
-        val personalData = JSONObject().apply {
-            put("needGroupInfo", false)
-            put("pageNumber", page)
-            put("pageSize", pageSize)
-            put("groupName", "在售")
-            put("defaultGroup", true)
-            if (userId.isNotBlank()) put("userId", userId)
-        }
-        val personal = callMtop(
-            cookie = cookie,
-            api = "mtop.idle.web.xyh.item.list",
-            version = "1.0",
-            dataObj = personalData,
-            extraQuery = mapOf("spm_cnt" to "a21ybx.im.0.0"),
-            onCookieRefreshed = onCookieRefreshed,
-            onResult = onResult
-        )
-        if (personal.success) {
-            val items = mapPersonalItems(personal.json)
-            if (items.isNotEmpty()) {
-                Log.i(TAG, "queryOnSaleItems 个人版成功，获取 ${items.size} 件")
-                return true to items
+        fun tryPersonal(grouped: Boolean): List<OnSaleItem>? {
+            val d = JSONObject().apply {
+                put("pageNumber", page)
+                put("pageSize", pageSize)
+                if (grouped) {
+                    put("needGroupInfo", false)
+                    put("groupName", "在售")
+                    put("defaultGroup", true)
+                }
+                if (userId.isNotBlank()) put("userId", userId)
             }
-            Log.i(TAG, "queryOnSaleItems 个人版未返回商品(0件)，尝试鱼小铺卖家平台")
-        }
-
-        // 风控错误绝不回退
-        if (isRiskControl(personal.retCode.ifBlank { personal.message })) {
-            Log.w(TAG, "queryOnSaleItems 个人版触碰风控，终止回退: ${personal.retCode}")
-            return false to emptyList()
-        }
-
-        // 2) 鱼小铺卖家平台查询（携带 seller.goofish.com 与 idle_site_biz_code=COMMONPRO 专业版头）
-        val shopData = JSONObject().apply {
-            put("pageNo", page)
-            put("pageSize", pageSize)
-            put("bizType", "commonPro")
-            put("searchRequest", "{}")
-            put("itemStatus", "0")
-        }
-        val shop = callMtop(
-            cookie = cookie,
-            api = "mtop.alibaba.idle.seller.pc.common.item.search",
-            version = "1.0",
-            dataObj = shopData,
-            extraQuery = mapOf(
-                "needLoginPC" to "true",
-                "accountSite" to "xianyu",
-                "spm_cnt" to "a21107h.42826273.0.0"
-            ),
-            onCookieRefreshed = onCookieRefreshed,
-            onResult = onResult,
-            origin = "https://seller.goofish.com",
-            referer = "https://seller.goofish.com/?site=COMMONPRO",
-            extraHeaders = mapOf(
-                "idle_site_biz_code" to "COMMONPRO",
-                "idle_user_group_member_id" to ""
+            val r = callMtop(
+                cookie = cookie,
+                api = "mtop.idle.web.xyh.item.list",
+                version = "1.0",
+                dataObj = d,
+                extraQuery = mapOf("spm_cnt" to "a21ybx.im.0.0"),
+                onCookieRefreshed = onCookieRefreshed,
+                onResult = onResult
             )
-        )
-        if (shop.success) {
-            val items = mapShopItems(shop.json)
-            if (items.isNotEmpty()) {
-                Log.i(TAG, "queryOnSaleItems 鱼小铺成功，获取 ${items.size} 件")
-                return true to items
+            if (!r.success) {
+                lastErr = r.retCode.ifBlank { r.message }
+                return null
             }
+            anySuccess = true
+            val items = mapPersonalItems(r.json)
+            // 全量兜底时过滤出非在售
+            return if (grouped) items else items.filter { it.status == "在售" }
         }
 
-        // 3) 兜底：尝试不带 groupName 的全量个人宝贝查询
-        val fallbackData = JSONObject().apply {
-            put("pageNumber", page)
-            put("pageSize", pageSize)
-            if (userId.isNotBlank()) put("userId", userId)
-        }
-        val fallback = callMtop(
-            cookie = cookie,
-            api = "mtop.idle.web.xyh.item.list",
-            version = "1.0",
-            dataObj = fallbackData,
-            onCookieRefreshed = onCookieRefreshed
-        )
-        if (fallback.success) {
-            val items = mapPersonalItems(fallback.json)
-            if (items.isNotEmpty()) return true to items
+        fun tryShop(): List<OnSaleItem>? {
+            val d = JSONObject().apply {
+                put("pageNo", page)
+                put("pageSize", pageSize)
+                put("bizType", "commonPro")
+                put("searchRequest", "{}")
+                put("itemStatus", "0")
+            }
+            val r = callMtop(
+                cookie = cookie,
+                api = "mtop.alibaba.idle.seller.pc.common.item.search",
+                version = "1.0",
+                dataObj = d,
+                extraQuery = mapOf(
+                    "needLoginPC" to "true",
+                    "accountSite" to "xianyu",
+                    "spm_cnt" to "a21107h.42826273.0.0"
+                ),
+                onCookieRefreshed = onCookieRefreshed,
+                onResult = onResult,
+                origin = "https://seller.goofish.com",
+                referer = "https://seller.goofish.com/?site=COMMONPRO",
+                extraHeaders = mapOf("idle_site_biz_code" to "COMMONPRO")
+            )
+            if (!r.success) {
+                lastErr = r.retCode.ifBlank { r.message }
+                return null
+            }
+            anySuccess = true
+            return mapShopItems(r.json)
         }
 
-        return true to emptyList()
+        // 翻页：锁定第 1 页命中的源，绝不换源
+        if (source != null) {
+            val items = when (source) {
+                "shop" -> tryShop()
+                "all" -> tryPersonal(grouped = false)
+                else -> tryPersonal(grouped = true)
+            }
+            return if (items == null) OnSaleResult(false, emptyList(), source, lastErr)
+                   else OnSaleResult(true, items, source)
+        }
+
+        // 第 1 页自动探测
+        tryPersonal(grouped = true)?.let { if (it.isNotEmpty()) return OnSaleResult(true, it, "personal") }
+        if (isRiskControl(lastErr)) return OnSaleResult(false, emptyList(), "", lastErr)
+
+        tryShop()?.let { if (it.isNotEmpty()) return OnSaleResult(true, it, "shop") }
+        if (isRiskControl(lastErr)) return OnSaleResult(false, emptyList(), "", lastErr)
+
+        tryPersonal(grouped = false)?.let { if (it.isNotEmpty()) return OnSaleResult(true, it, "all") }
+
+        return OnSaleResult(anySuccess, emptyList(), "", if (anySuccess) "" else lastErr)
     }
 
     private val RISK_MARKERS = arrayOf("RGV587_ERROR", "FAIL_SYS_USER_VALIDATE", "LIMIT", "captcha", "被挤爆")
@@ -637,7 +646,7 @@ object MtopClient {
             val picUrl = card.optJSONObject("picInfo")?.optString("url").orEmpty()
                 .ifBlank { card.optJSONObject("picInfo")?.optString("picUrl").orEmpty() }
                 .ifBlank { firstNonBlank(card, "picUrl", "imageUrl", "image", "itemImageUrl", "cover") ?: "" }
-            val status = firstNonBlank(card, "itemStatusDesc", "status")
+            val status = card.optString("itemStatusDesc").takeIf { it.isNotBlank() && it != "null" }
                 ?: if (card.optInt("itemStatus") == 0) "在售" else "已下架"
             val detailUrl = "https://www.goofish.com/item?id=$id"
             out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "personal"))
