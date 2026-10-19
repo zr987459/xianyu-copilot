@@ -60,6 +60,10 @@ class LocalServer(private val context: Context) {
 
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
+
+    /** 是否已真正绑定 9005。MainActivity 据此判断，避免加载被其它 App 抢占的端口。 */
+    @Volatile var listening = false
+        private set
     private val pool: ExecutorService = Executors.newCachedThreadPool { r ->
         Thread(r, "LocalServer-worker").apply { isDaemon = true }
     }
@@ -74,6 +78,7 @@ class LocalServer(private val context: Context) {
             try {
                 ss = ServerSocket(PORT, 50, InetAddress.getByName(HOST))
                 serverSocket = ss
+                listening = true
                 while (running) {
                     val client = try {
                         ss.accept()
@@ -84,6 +89,8 @@ class LocalServer(private val context: Context) {
                 }
             } catch (_: Throwable) {
             } finally {
+                listening = false
+                running = false
                 try { ss?.close() } catch (_: Exception) {}
             }
         }
@@ -402,7 +409,12 @@ class LocalServer(private val context: Context) {
             cookieObj.put("hasCookie", cookie.isNotBlank())
             cookieObj.put("nick", nick)
             cookieObj.put("userId", activeAcc?.userId ?: "")
-            cookieObj.put("valid", cookie.isNotBlank())
+            // 有效性取最近一次真实校验结果，而不是「cookie 非空」
+            val lastCheck = activeAcc?.let { db.getAccountCheck(it.userId) }
+            val checkedOk = lastCheck == null || lastCheck.first == 0L || lastCheck.second
+            cookieObj.put("valid", cookie.isNotBlank() && checkedOk)
+            cookieObj.put("lastCheckAt", lastCheck?.first ?: 0L)
+            cookieObj.put("lastCheckMsg", lastCheck?.third ?: "")
             put("cookie", cookieObj)
 
             val accObj = JSONObject()

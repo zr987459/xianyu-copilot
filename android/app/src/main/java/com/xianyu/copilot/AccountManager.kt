@@ -69,14 +69,27 @@ object AccountManager {
 
         if (!check.valid) {
             Log.w(TAG, "${source.label} 校验失败: ${check.message}")
-            // 校验失败：只入库不激活，避免顶掉当前正常账号
             val db = CardDatabase.get(context)
+            val existing = db.getAccountCookie(unb)
+            if (existing.isNotEmpty()) {
+                // 该账号已有 cookie：绝不用校验失败的 cookie 覆盖它，也不改它的状态
+                return SaveResult(
+                    ok = false,
+                    nick = parsed["tracknick"] ?: unb,
+                    userId = unb,
+                    cookie = finalCookie,
+                    activated = false,
+                    message = "Cookie 校验未通过：${check.message}（已有账号保持不变）"
+                )
+            }
+            // 新账号：只入库不激活，状态标为 EXPIRED
             db.addOrUpdateAccount(
                 userId = unb,
                 nick = parsed["tracknick"] ?: unb,
                 avatar = "",
                 cookie = finalCookie,
-                activate = false
+                activate = false,
+                status = "EXPIRED"
             )
             db.recordAccountCheck(unb, success = false, detail = check.message)
             return SaveResult(

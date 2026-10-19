@@ -144,7 +144,13 @@ object MtopClient {
         dataObj: JSONObject,
         extraQuery: Map<String, String> = emptyMap(),
         onCookieRefreshed: ((String) -> Unit)? = null,
-        onResult: ((Boolean, String) -> Unit)? = null
+        onResult: ((Boolean, String) -> Unit)? = null,
+        /**
+         * 是否允许拿库里该账号的 cookie 作为刷新基准。
+         * 登录校验时必须为 false：此时库里是「旧会话」，用它做基准会把刚登录的新 cookie
+         * 顺回旧的，或把新令牌拼到已失效的 cookie2/sgcookie 上导致新登录被判失败。
+         */
+        allowStoredBase: Boolean = true
     ): ApiResult {
         val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
 
@@ -162,7 +168,7 @@ object MtopClient {
         // 令牌过期 / 为空：在账号锁内完成刷新，避免并发互盖
         synchronized(lockFor(unb)) {
             // 拿锁后重新校一下：若别人已刷新，直接用新令牌重签即可
-            val baseCookie = currentCookieFor(unb) ?: cookie
+            val baseCookie = (if (allowStoredBase) currentCookieFor(unb) else null) ?: cookie
             val oldToken = MtopSigner.parseCookies(baseCookie)["_m_h5_tk"]
 
             // 先尝试用最新 cookie 直接重签（可能是别人刚刷新的）
@@ -369,7 +375,8 @@ object MtopClient {
                 api = "mtop.taobao.idlemessage.pc.loginuser.get",
                 version = "1.0",
                 dataObj = JSONObject(),
-                onCookieRefreshed = { refreshed = it }
+                onCookieRefreshed = { refreshed = it },
+                allowStoredBase = false
             )
             if (!r.success) {
                 return CookieCheck(false, cookie = refreshed, message = r.message)

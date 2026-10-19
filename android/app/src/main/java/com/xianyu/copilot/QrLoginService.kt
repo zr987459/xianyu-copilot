@@ -88,6 +88,10 @@ object QrLoginService {
 
     private val sessions = ConcurrentHashMap<String, Session>()
 
+    /** 最近一次触发风控验证的扫码会话 cookie，供 MainActivity 注入验证页。 */
+    @Volatile var pendingVerificationCookies: List<Cookie> = emptyList()
+        internal set
+
     /** 会话最长存活 5 分钟，过期自动回收。 */
     private const val SESSION_TTL_MS = 5 * 60 * 1000L
 
@@ -309,6 +313,8 @@ object QrLoginService {
                             // 风控二次验证：此时还拿不到可用的 unb
                             if (data.optBoolean("iframeRedirect")) {
                                 val vUrl = data.optString("iframeRedirectUrl")
+                                // 交给 App 内验证页注入，接上扫码会话
+                                pendingVerificationCookies = session.jar.snapshot()
                                 session.finished = true
                                 return CheckResult(
                                     Status.VERIFICATION_REQUIRED,

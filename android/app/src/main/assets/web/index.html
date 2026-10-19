@@ -496,9 +496,9 @@ function loadOrders(){
           '<span>规格：<b>' + esc(o.sku || '默认') + '</b></span>' +
           '<span>件数：<b>' + (o.quantity || 1) + ' 件</b></span>' +
         '</div>' +
-        '<button class="btn full" onclick="shipNow(this,\'' + esc(o.orderId) + '\',\'' +
-           esc((o.title||'').replace(/'/g,'')) + '\',\'' + esc((o.sku||'').replace(/'/g,'')) + '\',' +
-           (o.quantity || 1) + ')">立即发货</button>' +
+        '<button class="btn full" onclick="shipNow(this,' + esc(JSON.stringify(String(o.orderId||''))) + ',' +
+           esc(JSON.stringify(String(o.title||''))) + ',' + esc(JSON.stringify(String(o.sku||''))) + ',' +
+           (parseInt(o.quantity, 10) || 1) + ')">立即发货</button>' +
       '</div>';
     }
     box.innerHTML = html;
