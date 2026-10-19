@@ -30,7 +30,7 @@ class LocalServer(private val context: Context) {
     /**
      * 每个实例启动时生成的随机访问令牌。
      *
-     * 修复背景：旧版 127.0.0.1:9005/api/* 无任何鉴权，且带 Access-Control-Allow-Origin: *，
+     * 修复背景：旧版 127.0.0.1:9005 的 api 路由无任何鉴权，且带 Access-Control-Allow-Origin 通配，
      * 手机上任意网页都能直接调用 import_cookie / accounts_switch 窃取或篡改账号。
      *
      * 现在：
@@ -45,6 +45,7 @@ class LocalServer(private val context: Context) {
         java.security.SecureRandom().nextBytes(bytes)
         return bytes.joinToString("") { String.format("%02x", it) }
     }
+
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
     private val pool: ExecutorService = Executors.newCachedThreadPool { r ->
@@ -244,7 +245,7 @@ class LocalServer(private val context: Context) {
             return Response(204, "text/plain", ByteArray(0))
         }
         if (req.path.startsWith("/api/")) {
-            // 安全门禁：/api/* 必须携带正确令牌，否则 401。
+            // 安全门禁：所有 api 路由必须携带正确令牌，否则 401。
             // 令牌只由 App 自己 WebView 携带，外部页面拿不到。
             if (!isAuthorized(req)) {
                 return jsonError(401, "unauthorized")

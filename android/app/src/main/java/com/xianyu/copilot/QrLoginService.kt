@@ -116,7 +116,7 @@ object QrLoginService {
             }
 
             // Step 2: 生成二维码
-            val genUrl = HttpUrl.parse(URL_GENERATE)!!.newBuilder().apply {
+            val genUrl = HttpUrl.Builder().scheme("https").host("passport.goofish.com").addPathSegments("newlogin/qrcode/generate.do").apply {
                 session.formParams.forEach { (k, v) -> addQueryParameter(k, v) }
             }.build()
 
@@ -174,7 +174,7 @@ object QrLoginService {
     /** 打开 mini_login.htm，解析 window.viewData 里的 loginFormData。 */
     private fun loadLoginParams(session: Session): Boolean {
         return try {
-            val url = HttpUrl.parse(URL_MINI_LOGIN)!!.newBuilder().apply {
+            val url = HttpUrl.Builder().scheme("https").host("passport.goofish.com").addPathSegments("mini_login.htm").apply {
                 addQueryParameter("lang", "zh_cn")
                 addQueryParameter("appName", "xianyu")
                 addQueryParameter("appEntrance", "web")
