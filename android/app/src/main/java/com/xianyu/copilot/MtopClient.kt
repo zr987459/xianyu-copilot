@@ -661,7 +661,7 @@ object MtopClient {
             val title = firstNonBlank(o, "title", "itemTitle", "name") ?: ""
             val price = firstNonBlank(o, "reservePrice", "price", "soldPrice") ?: ""
             val picUrl = firstNonBlank(o, "itemImageUrl", "imageUrl", "picUrl", "cover") ?: ""
-            val status = firstNonBlank(o, "itemStatusDesc", "status").ifBlank { "在售" }
+            val status = firstNonBlank(o, "itemStatusDesc", "status")?.ifBlank { "在售" } ?: "在售"
             val detailUrl = "https://www.goofish.com/item?id=$id"
             out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "shop"))
         }
