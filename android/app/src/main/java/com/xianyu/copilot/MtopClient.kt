@@ -691,6 +691,7 @@ object MtopClient {
         desc: String,
         price: Double,
         images: List<UploadedImage> = emptyList(),
+        isVirtual: Boolean = true,
         onCookieRefreshed: ((String) -> Unit)? = null,
         onResult: ((Boolean, String) -> Unit)? = null
     ): Pair<Boolean, String> {
@@ -741,14 +742,13 @@ object MtopClient {
                 put("origPriceInCent", priceCent)
                 put("priceInCent", priceCent)
             })
-            // 修复：虚拟商品无需邮寄运费设置（supportFreight=false）
+            // 修复：虚拟商品无需邮寄运费设置（supportFreight=!isVirtual）
             put("itemPostFeeDTO", JSONObject().apply {
                 put("canFreeShipping", true)
-                put("supportFreight", false)
+                put("supportFreight", !isVirtual)
                 put("onlyTakeSelf", false)
             })
-            // 修复：不伪造上海 GPS/行政区划，由平台按账号默认设置定位
-            put("itemAddrDTO", JSONObject())
+            // 修复：空对象 {} 可能被判参数缺失，直接不传，由闲鱼按卖家账号默认地址处理
             put("uniqueCode", "${System.currentTimeMillis()}")
             put("sourceId", "pcMainPublish")
             put("bizcode", "pcMainPublish")

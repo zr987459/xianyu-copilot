@@ -982,14 +982,16 @@ function compressImage(file){
 }
 
 function onImageChosen(files){
-  if(!files || !files.length) return;
+  var inp = $('#pubFileInput');
+  if(!files || !files.length){ if(inp) inp.value = ''; return; }
   var file = files[0];
+  var jpgName = (file.name || 'img').replace(/\.[^.]+$/, '') + '.jpg';
   toast('正在压缩处理图片…', 1500);
   compressImage(file).then(function(res){
     toast('正在直传到闲鱼图床…', 4000);
     return api('/api/publish/upload_image', {
       method: 'POST',
-      body: { image: res.dataUrl, filename: file.name, width: res.width, height: res.height }
+      body: { image: res.dataUrl, filename: jpgName, width: res.width, height: res.height }
     }).then(function(d){
       uploadedImages.push({ url: d.url, width: d.width || res.width, height: d.height || res.height });
       renderUploadGrid();
@@ -997,7 +999,7 @@ function onImageChosen(files){
     });
   }).catch(function(err){
     toast('上传失败: ' + err.message);
-  });
+  }).then(function(){ if(inp) inp.value = ''; });
 }
 
 function removeUploadedImage(idx){

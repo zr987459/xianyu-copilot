@@ -25,13 +25,13 @@ class MainActivity : AppCompatActivity() {
     /** 未消费的图片选择回调，WebView 同一时刻只允许一个，需显式取消旧调用避免泄漏。 */
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
 
-    private val pickImagesLauncher = registerForActivityResult(
-        ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
+    private val pickImageLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
         val cb = fileChooserCallback
         fileChooserCallback = null
-        // 用户取消时必须回 null，否则网页 input 永久卡住
-        cb?.onReceiveValue(if (uris.isNullOrEmpty()) null else uris.toTypedArray())
+        // 单选回传数组，用户取消回传 null 避免卡死
+        cb?.onReceiveValue(uri?.let { arrayOf(it) })
     }
 
     inner class AndroidBridge {
@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
                     fileChooserCallback?.onReceiveValue(null)
                     fileChooserCallback = filePathCallback
                     return try {
-                        pickImagesLauncher.launch("image/*")
+                        pickImageLauncher.launch("image/*")
                         true
                     } catch (e: Exception) {
                         fileChooserCallback = null
