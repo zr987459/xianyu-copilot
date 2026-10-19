@@ -361,9 +361,24 @@ function esc(s){
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+var __apiToken = null;
+function getApiToken(){
+  if(__apiToken) return __apiToken;
+  try {
+    if(window.AndroidBridge && typeof window.AndroidBridge.getApiToken === 'function'){
+      __apiToken = String(window.AndroidBridge.getApiToken() || '');
+    }
+  } catch(e){ __apiToken = null; }
+  return __apiToken || '';
+}
+
 function api(path, opts){
   opts = opts || {};
   var cfg = { method: opts.method || 'GET', headers: {} };
+  // 安全：令牌不再写进 HTML（否则本机任意 App GET / 就能读走），
+  // 只能通过 AndroidBridge.getApiToken() 从 App 自己的 WebView 取。
+  var tk = getApiToken();
+  if(tk){ cfg.headers['X-Api-Token'] = tk; }
   if(opts.body != null){
     cfg.method = opts.method || 'POST';
     cfg.headers['Content-Type'] = 'application/json';
@@ -371,8 +386,17 @@ function api(path, opts){
   }
   return fetch(API + path, cfg).then(function(r){
     return r.text().then(function(txt){
-      try { return JSON.parse(txt); }
+      var data;
+      try { data = JSON.parse(txt); }
       catch(e){ throw new Error('返回格式异常: ' + txt.slice(0, 120)); }
+      if(r.status === 401){ throw new Error('未授权（令牌失效），请重启 App'); }
+      if(r.status >= 400 || data.ok === false){
+        var msg = data.error || data.message || (data.data && data.data.message) || ('HTTP ' + r.status);
+        var err = new Error(msg);
+        err.payload = data;
+        throw err;
+      }
+      return data;
     });
   });
 }
@@ -731,11 +755,14 @@ function openQr(){
   $('#qrStat').textContent = '请求中…';
 
   api('/api/auth/qrcode/create', { method:'POST' }).then(function(d){
-    var url = d.qrcode_url || d.qrImgUrl || '';
-    if(!url){ throw new Error('未获取到二维码'); }
-    $('#qrBox').innerHTML = '<img src="' + esc(url) + '" alt="二维码" onerror="this.style.display=\'none\'">';
+    // 修复：generate.do 返回的是二维码内容，不是图片地址。
+    // 后端已在本地用 ZXing 渲染成 base64 PNG，这里直接用 qrImage。
+    var img = d.qrImage || d.qrDataUrl || '';
+    if(!img){ throw new Error('未获取到二维码图片'); }
+    $('#qrBox').innerHTML = '<img src="' + esc(img) + '" alt="二维码" style="width:100%;height:100%;object-fit:contain">';
+    $('#qrStat').className = 'qrstat';
     $('#qrStat').textContent = '请用闲鱼 App 扫码';
-    startQrPoll(d.token || d.lgToken);
+    startQrPoll(d.sessionId || d.token || d.lgToken);
   }).catch(function(e){
     $('#qrBox').innerHTML = '<div style="color:var(--err);font-size:12px;text-align:center">生成失败<br>' +
       esc(e.message) + '</div>';
@@ -748,35 +775,77 @@ function startQrPoll(token){
   stopQrPoll();
   if(!token) return;
   var ticks = 0;
-  qrTimer = setInterval(function(){
-    ticks++;
-    if(ticks > 100){ stopQrPoll(); $('#qrStat').textContent = '二维码已超时，请刷新'; return; }
-    api('/api/auth/qrcode/check?lgToken=' + encodeURIComponent(token)).then(function(d){
-      var st = d.status || '';
-      var code = d.statusCode || '';
-      if(st === 'success' || code === 'SUCCESS' || code === '10006'){
+  // 修复：setInterval 会在上一次请求还没返回时就发下一次，
+  // 服务端落库要 2 秒以上，导致重复轮询/重复落库。改成链式 setTimeout。
+  function next(){
+    if(!qrTimer) return;
+    if(++ticks > 100){ stopQrPoll(); $('#qrStat').textContent = '二维码已超时，请点击下方刷新'; return; }
+    poll();
+  }
+  function poll(){
+    api('/api/auth/qrcode/check?sessionId=' + encodeURIComponent(token)).then(function(d){
+      var st = String(d.status || '').toLowerCase();
+      var code = String(d.statusCode || '').toUpperCase();
+      if(st === 'success' || code === 'SUCCESS'){
         stopQrPoll();
         $('#qrStat').className = 'qrstat ok';
         $('#qrStat').textContent = '登录成功：' + (d.nick || '');
         toast('扫码登录成功');
         setTimeout(function(){ closeQr(); loadAccounts(); loadStats(); }, 900);
-      } else if(st === 'scanned' || code === 'SCANNED' || code === '10001'){
+      } else if(st === 'scanned' || code === 'SCANNED'){
         $('#qrStat').className = 'qrstat warn';
         $('#qrStat').textContent = '已扫码，请在手机上确认';
-      } else if(st === 'expired' || code === 'EXPIRED' || code === '10004'){
+      } else if(st === 'expired' || code === 'EXPIRED'){
         stopQrPoll();
         $('#qrStat').className = 'qrstat warn';
         $('#qrStat').textContent = '二维码已过期，请点击下方刷新';
+      } else if(st === 'verification_required' || st === 'verificationrequired'){
+        stopQrPoll();
+        $('#qrStat').className = 'qrstat warn';
+        $('#qrStat').textContent = d.message || '需要完成安全验证';
+        if(d.verificationUrl){
+          // 修复：原来只显示一段文字链接，手机上没法点。
+          // 改为 App 内直接打开验证页，验证完成后复用网页登录的抓 Cookie 逻辑。
+          $('#qrBox').innerHTML = '<div style="font-size:12px;text-align:center;padding:8px">' +
+            '<div>需要完成闲鱼安全验证</div>' +
+            '<button class="btn primary" style="margin-top:10px" id="btnVerify">在 App 内验证</button>' +
+            '<div style="word-break:break-all;margin-top:8px;font-size:11px;color:var(--muted)">' +
+            esc(d.verificationUrl) + '</div></div>';
+          var vb = document.getElementById('btnVerify');
+          if(vb) vb.onclick = function(){
+            try {
+              if(window.AndroidBridge && typeof window.AndroidBridge.openVerification === 'function'){
+                window.AndroidBridge.openVerification(d.verificationUrl);
+              } else { toast('当前环境不支持，请复制链接到浏览器'); }
+            } catch(e){ toast('打开验证页失败'); }
+          };
+        }
+      } else if(st === 'error' || code === 'ERROR'){
+        // 修复：旧版未知状态/异常全部静默，用户看不到任何失败原因
+        stopQrPoll();
+        $('#qrStat').className = 'qrstat warn';
+        $('#qrStat').textContent = d.message || '扫码登录失败，请重试';
+        toast('扫码失败: ' + (d.message || '未知错误'));
       } else {
         $('#qrStat').className = 'qrstat';
         $('#qrStat').textContent = '等待扫码…';
       }
-    }).catch(function(){});
-  }, 2000);
+      // 上一次请求返回后再排下一次，避免并发轮询重复落库
+      if(qrTimer) qrTimer = setTimeout(next, 2000);
+    }).catch(function(e){
+      // .catch 不能为空，否则失败完全不可见
+      stopQrPoll();
+      $('#qrStat').className = 'qrstat warn';
+      $('#qrStat').textContent = '状态查询失败：' + (e.message || '网络异常');
+      toast('扫码状态查询失败: ' + (e.message || '网络异常'));
+    });
+  }
+  qrTimer = setTimeout(next, 2000);
 }
 
 function stopQrPoll(){
-  if(qrTimer){ clearInterval(qrTimer); qrTimer = null; }
+  // qrTimer 可能是 setInterval 也可能是链式 setTimeout 的 id，两者都清
+  if(qrTimer){ clearInterval(qrTimer); clearTimeout(qrTimer); qrTimer = null; }
 }
 
 function closeQr(){
@@ -852,6 +921,22 @@ function publishItem(){
 }
 
 /* ================= 启动 ================= */
+/**
+ * 兼容层：Kotlin 侧（以及潜在的外部调用）会调用 window.refreshAccounts()，
+ * 旧前端根本没定义这个函数，导致网页登录完成后账号列表不刷新。
+ */
+window.refreshAccounts = function(){
+  try { loadAccounts(); } catch(e){}
+  try { loadStats(); } catch(e){}
+};
+
+/** 网页登录成功事件（由 MainActivity 注入的 JS 触发）。 */
+window.addEventListener('xianyu-login-success', function(ev){
+  var nick = ev && ev.detail && ev.detail.nick ? ev.detail.nick : '';
+  try { toast(nick ? ('登录成功：' + nick) : '登录成功'); } catch(e){}
+  window.refreshAccounts();
+});
+
 function boot(){
   loadDaemon();
   loadStats();

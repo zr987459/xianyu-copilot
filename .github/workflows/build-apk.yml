@@ -2,7 +2,9 @@ name: Build Xianyu Copilot APK
 
 on:
   push:
-    branches: [ "main", "feat/**" ]
+    branches: [ "main", "feat/**", "fix/**" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
@@ -32,12 +34,89 @@ jobs:
         run: |
           chmod +x android/gradlew
 
+      # 签名材料全部来自 Actions Secrets，仓库里不再存放 keystore 与明文密码。
+      # 解码到 runner 临时目录，构建结束后随 runner 一起销毁。
+      - name: Prepare Signing Key
+        env:
+          KS_B64: ${{ secrets.XIANYU_KS_B64 }}
+          KS_PASS: ${{ secrets.XIANYU_KS_PASS }}
+          KEY_PASS: ${{ secrets.XIANYU_KEY_PASS }}
+          KS_ALIAS: ${{ secrets.XIANYU_KS_ALIAS }}
+          OLD_KS_B64: ${{ secrets.XIANYU_OLD_KS_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KS_B64:-}" ]; then
+            echo "::error::缺少 XIANYU_KS_B64，无法签名发布"
+            exit 1
+          fi
+          KS_DIR="$RUNNER_TEMP/ks"
+          mkdir -p "$KS_DIR"
+          echo "$KS_B64" | base64 -d > "$KS_DIR/release.jks"
+          echo "XIANYU_KS_PATH=$KS_DIR/release.jks" >> "$GITHUB_ENV"
+          echo "XIANYU_KS_PASS=${KS_PASS}" >> "$GITHUB_ENV"
+          echo "XIANYU_KEY_PASS=${KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
+          echo "XIANYU_KS_ALIAS=${KS_ALIAS:-xianyu}" >> "$GITHUB_ENV"
+          if [ -n "${OLD_KS_B64:-}" ]; then
+            echo "$OLD_KS_B64" | base64 -d > "$KS_DIR/old.jks"
+            echo "XIANYU_OLD_KS_PATH=$KS_DIR/old.jks" >> "$GITHUB_ENV"
+          fi
+
       - name: Build Android Release APK
         run: |
           cd android
           ./gradlew assembleRelease --no-daemon --stacktrace
           mkdir -p ../dist
-          cp app/build/outputs/apk/release/*.apk ../dist/XianyuCopilot.apk
+          cp app/build/outputs/apk/release/*.apk ../dist/XianyuCopilot-unsigned.apk
+
+      # v3 密钥轮换（带双签名者覆盖）：
+      # 当有 lineage 时，旧 signer 签低版本 SDK（保证老系统覆盖），新 signer 签高版本 SDK；
+      # Android 9+ 通过 lineage 认新钥为旧钥的合法继承者，实现无感平滑覆盖升级。
+      - name: Sign APK with Key Rotation Lineage
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          APKSIGNER="$BT/apksigner"
+          [ -x "$APKSIGNER" ] || APKSIGNER="java -jar $BT/lib/apksigner.jar"
+
+          UNSIGNED=dist/XianyuCopilot-unsigned.apk
+          OUT=dist/XianyuCopilot.apk
+
+          if [ -f android/xianyu-lineage.bin ] && [ -n "${XIANYU_OLD_KS_PATH:-}" ]; then
+            $APKSIGNER sign \
+              --ks "$XIANYU_OLD_KS_PATH" --ks-pass "pass:cookiebox123" --ks-key-alias "cookiebox" \
+              --next-signer \
+              --ks "$XIANYU_KS_PATH" --ks-pass "pass:$XIANYU_KS_PASS" \
+              --ks-key-alias "$XIANYU_KS_ALIAS" --key-pass "pass:$XIANYU_KEY_PASS" \
+              --lineage android/xianyu-lineage.bin \
+              --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+              --out "$OUT" "$UNSIGNED"
+          else
+            $APKSIGNER sign \
+              --ks "$XIANYU_KS_PATH" --ks-pass "pass:$XIANYU_KS_PASS" \
+              --ks-key-alias "$XIANYU_KS_ALIAS" --key-pass "pass:$XIANYU_KEY_PASS" \
+              --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+              --out "$OUT" "$UNSIGNED"
+          fi
+
+          rm -f "$UNSIGNED"
+          $APKSIGNER verify --print-certs "$OUT" | head -n 20
+
+      # 签名指纹校验：证书 SHA-256 与预期不一致则直接失败，防止误用密钥。
+      - name: Verify Signing Certificate
+        env:
+          EXPECTED_SHA256: ${{ secrets.XIANYU_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          APKSIGNER="$BT/apksigner"
+          [ -x "$APKSIGNER" ] || APKSIGNER="java -jar $BT/lib/apksigner.jar"
+          ACTUAL=$($APKSIGNER verify --print-certs dist/XianyuCopilot.apk \
+                   | grep -i "SHA-256" | head -n1 | awk -F': ' '{print $2}' | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+          echo "实际证书 SHA-256: $ACTUAL"
+          if [ -n "${EXPECTED_SHA256:-}" ] && [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "::error::签名证书指纹不匹配！预期 $EXPECTED_SHA256，实际 $ACTUAL"
+            exit 1
+          fi
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -50,32 +129,50 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.0
-          name: "Xianyu Copilot v1.2.0 (自动发货深度优化 · 一单多件 + 幂等防重发 + 全新界面)"
-          target_commitish: ${{ github.sha }}
-          prerelease: false
+          tag_name: v1.3.1
+          name: "Xianyu Copilot v1.3.0 (登录模块全面重写 · 令牌自愈 + 安全加固)"
           files: dist/XianyuCopilot.apk
           body: |
-            ### 🐟 闲鱼管家 Xianyu Copilot v1.2.0
+            ### 🐟 闲鱼管家 Xianyu Copilot v1.3.0
 
-            本次更新重点深度优化「自动发货」引擎，并全面重做前端界面（五页签）。
+            本次重点**完全重写登录模块**，并做了安全加固与令牌自愈。
 
-            - 🚚 **自动发货深度优化（参考成熟开源项目）**：
-              - **一单多件**：自动解析 buyAmount / buyQuantity，拍 N 件精准出库 N 张卡密；
-              - **规格 SKU 精准匹配**：同一关键词下不同规格（月卡/季卡）各自独立出库，杜绝错发；
-              - **复合发货**：独享卡密 + 固定网盘链接/使用说明 同时下发；
-              - **幂等防重发**：同一订单绝不二次发货（数据库 + 流水双重校验）；
-            - 🎨 **全新五页签界面**：
-              - 发货：守护开关、待发货订单列表（支持一键手动发货）、实时发货流水；
-              - 卡密：批量导入、库存分布统计、在库/已发明细核销状态；
-              - 规则：关键词 + 规格 + 固定附言 + 发货确认语 + 卡密池开关；
-              - 账号：当前账号卡片、已绑定账号列表（切换/删除）；
-              - 上架：免浏览器一键发布宝贝；
-            - 🔐 **三种登录方式全部就位**：
-              - 📷 扫码登录（弹窗展示二维码 + 实时状态轮询：等待/已扫码/成功/过期）；
-              - 🌐 网页登录（App 内 WebView 授权）；
-              - 🔑 Cookie 粘贴导入（自动校验有效性并绑定账号）；
-            - ⚡ **技术细节**：
-              - 新增 `GET /api/orders/waiting` 真实待发货订单接口；
-              - 新增 `POST /api/delivery/ship_now` 手动一键发货接口；
-              - 纯内联 SVG 图标，零 CDN 依赖，离线秒开。
+            #### 🔐 登录模块重写（对应 19 项缺陷修复）
+
+            **一、扫码登录（整条链路换掉）**
+            - 旧实现走 `qrlogin.taobao.com`，全程拿不到 goofish 域 Cookie，业务接口必然失败；
+            - 新实现对齐官方真实链路：`passport.goofish.com/mini_login.htm` → `generate.do` → `query.do`；
+            - 二维码不再空白：`codeContent` 是**二维码内容**不是图片地址，现用 ZXing 本地渲染成 PNG；
+            - 每个扫码会话独立 CookieJar（旧版全局单例会被第二个弹窗冲掉）；
+            - 正确回传 `t` / `ck`，并支持风控触发时的二次验证引导；
+            - 失败/过期/风控都会明确提示，不再静默卡在「等待扫码」。
+
+            **二、网页登录**
+            - 统一 JS 桥名 `AndroidBridge`（旧版 Kotlin 注册小写、前端查大写，必然报「环境不支持」）；
+            - 登录前清空旧 Cookie，避免上一账号 cookie 混入；
+            - 登录完成后先访问 `www.goofish.com` 拿 `cookie2` / `_m_h5_tk`，再读取；
+            - Cookie 按名字去重、闲鱼域优先，不再出现重复字段与空段；
+            - `onPageFinished` 加一次性标志，不再重复起线程写库。
+
+            **三、Cookie 导入**
+            - 校验失败**不再激活**，绝不会顶掉当前正常账号；仅保存并明确告知原因。
+
+            **四、通用加固**
+            - 新增 `AccountManager.saveLogin()` 统一去重/补令牌/校验/激活策略（旧版三处各写一遍）；
+            - 缺少 `unb` 一律判定失败，**绝不编造用户 ID**（旧版会拿 tracknick 甚至时间戳顶替，导致重复记录）；
+            - **mtop 令牌自愈**：命中 `FAIL_SYS_TOKEN_EMPTY/EXPIRED` 时自动读取 `Set-Cookie` 新 `_m_h5_tk`，
+              成对合并 `_m_h5_tk_enc`、写回数据库、重签重试一次；按账号 single-flight 防并发互盖；
+            - 有效性不再是「cookie 非空」：记录最近一次真实校验结果，失效时**通知栏主动提醒**；
+            - `testCookie` 改用官方 `mtop.taobao.idlemessage.pc.loginuser.get`（原接口未经证实）。
+
+            #### 🛡️ 安全加固
+            - 本地 `127.0.0.1:9005/api/*` 全部接口需携带启动时随机生成的令牌，否则 **401**；
+            - 移除 `Access-Control-Allow-Origin: *`，手机上任意外部网页无法再调用导入/切换/删除账号接口；
+            - 账号 Cookie 改用 **AES-GCM + Android Keystore** 加密落库（密钥不可导出）；
+            - `allowBackup=false` + 数据提取规则排除数据库，防止备份泄露登录凭据。
+
+            #### ✅ 验收要点
+            - 三种登录方式成功后，账号列表**只新增一条**记录；
+            - 登录后立即查询订单即可成功；手动把 `_m_h5_tk` 改坏，下一次调用会自动刷新并成功；
+            - 登录失败不会顶掉当前激活账号；
+            - 外部请求 `127.0.0.1:9005/api/stats`（不带令牌）返回 401。

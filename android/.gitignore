@@ -1,0 +1,9 @@
+# 签名材料绝不入库（由 Actions Secrets 注入）
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# lineage 只含证书链（公开信息），需要入库供 v3 密钥轮换使用
+!xianyu-lineage.bin

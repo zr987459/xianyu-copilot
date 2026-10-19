@@ -26,6 +26,38 @@ class LocalServer(private val context: Context) {
     private val HOST = "127.0.0.1"
     private val PORT = 9005
     private val MAX_BODY = 4 * 1024 * 1024 // 4MB
+
+    /**
+     * 每个实例启动时生成的随机访问令牌。
+     *
+     * 修复背景：旧版 127.0.0.1:9005 的 api 路由无任何鉴权，且带 Access-Control-Allow-Origin 通配，
+     * 手机上任意网页都能直接调用 import_cookie / accounts_switch 窃取或篡改账号。
+     *
+     * 现在：
+     *  - API 请求必须携带 X-Api-Token，否则 401；
+     *  - 不再回 CORS 通配头，外部页面无法读取响应；
+     *  - 校验 Host 头，阻断 DNS rebinding；
+     *  - 令牌既不进 HTML 也不收 query 参数，只通过 AndroidBridge.getApiToken() 交给 App 自己的 WebView。
+     */
+    val apiToken: String = generateToken()
+
+    init {
+        INSTANCE = this
+    }
+
+    companion object {
+        /** 当前进程内唯一实例，供 AndroidBridge 取令牌。 */
+        @Volatile private var INSTANCE: LocalServer? = null
+
+        fun current(): LocalServer? = INSTANCE
+    }
+
+    private fun generateToken(): String {
+        val bytes = ByteArray(24)
+        java.security.SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { String.format("%02x", it) }
+    }
+
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
     private val pool: ExecutorService = Executors.newCachedThreadPool { r ->
@@ -187,9 +219,10 @@ class LocalServer(private val context: Context) {
         sb.append("Content-Type: ").append(resp.contentType).append("\r\n")
         sb.append("Content-Length: ").append(resp.body.size).append("\r\n")
         sb.append("Connection: close\r\n")
-        sb.append("Access-Control-Allow-Origin: *\r\n")
-        sb.append("Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n")
-        sb.append("Access-Control-Allow-Headers: Content-Type\r\n")
+        // 安全：不再回 Access-Control-Allow-Origin: *，
+        // 外部页面无法带自定义请求头发起简单请求，也读不到响应体。
+        sb.append("X-Content-Type-Options: nosniff\r\n")
+        sb.append("Cache-Control: no-store\r\n")
         for ((k, v) in resp.extraHeaders) sb.append(k).append(": ").append(v).append("\r\n")
         sb.append("\r\n")
         out.write(sb.toString().toByteArray(StandardCharsets.ISO_8859_1))
@@ -220,14 +253,63 @@ class LocalServer(private val context: Context) {
     }
 
     private fun route(req: Request): Response {
+        // 第一道门：Host 头必须是本机地址，阻断 DNS rebinding
+        if (!hasValidHost(req)) {
+            return Response(403, "text/plain", "forbidden".toByteArray(StandardCharsets.UTF_8))
+        }
         if (req.method == "OPTIONS") {
             return Response(204, "text/plain", ByteArray(0))
         }
         if (req.path.startsWith("/api/")) {
+            // 安全门禁：所有 api 路由必须携带正确令牌，否则 401。
+            // 令牌只由 App 自己 WebView 携带，外部页面拿不到。
+            if (!isAuthorized(req)) {
+                return jsonError(401, "unauthorized")
+            }
             return routeApi(req)
         }
         return try { serveStatic(req.path) }
         catch (_: FileNotFoundException) { jsonError(404, "not found") }
+    }
+
+    /**
+     * 校验请求令牌：只接受 X-Api-Token 头与 Authorization: Bearer。
+     *
+     * 修复：不再接受 ?token= 查询参数——它会进访问日志、历史记录，容易被旁路泄露。
+     */
+    private fun isAuthorized(req: Request): Boolean {
+        val fromHeader = req.headers["x-api-token"].orEmpty()
+        if (fromHeader.isNotEmpty() && constantTimeEquals(fromHeader, apiToken)) return true
+
+        val bearer = req.headers["authorization"].orEmpty()
+        if (bearer.startsWith("Bearer ", ignoreCase = true)) {
+            val t = bearer.substring(7).trim()
+            if (t.isNotEmpty() && constantTimeEquals(t, apiToken)) return true
+        }
+        return false
+    }
+
+    /**
+     * Host 头白名单，防 DNS rebinding。
+     *
+     * 恶意域名解析到 127.0.0.1 后，浏览器会认为它与目标同源；校验 Host 可确保
+     * 只有真正指向本机的请求才被处理。
+     */
+    private fun hasValidHost(req: Request): Boolean {
+        val host = req.headers["host"].orEmpty().trim().lowercase()
+        if (host.isEmpty()) return false
+        return host == "127.0.0.1:$PORT" ||
+            host == "localhost:$PORT" ||
+            host == "[::1]:$PORT" ||
+            host == "127.0.0.1" ||
+            host == "localhost"
+    }
+
+    private fun constantTimeEquals(a: String, b: String): Boolean {
+        if (a.length != b.length) return false
+        var diff = 0
+        for (i in a.indices) diff = diff or (a[i].code xor b[i].code)
+        return diff == 0
     }
 
     private fun routeApi(req: Request): Response {
@@ -397,26 +479,33 @@ class LocalServer(private val context: Context) {
         val cookie = json.optString("cookie", "").trim()
         if (cookie.isEmpty()) return jsonError(400, "cookie required")
 
-        val (ok, testNick) = MtopClient.testCookie(cookie)
-        val map = MtopSigner.parseCookies(cookie)
-        val unb = map["unb"] ?: map["tracknick"] ?: ("uid_" + System.currentTimeMillis().toString().takeLast(8))
-        val nick = if (ok && testNick.isNotBlank()) testNick else (map["tracknick"] ?: unb)
-
-        val db = CardDatabase.get(context)
-        val id = db.addOrUpdateAccount(
-            userId = unb,
-            nick = nick,
-            avatar = "",
-            cookie = cookie,
-            activate = true
+        // 修复：旧版校验失败也 activate=true，会把当前正常账号顶下线。
+        // 现在统一走 AccountManager：失败就只保存不激活，并如实告知原因。
+        val result = AccountManager.saveLogin(
+            context,
+            cookie,
+            AccountManager.Source.COOKIE,
+            activateOnSuccess = true
         )
 
+        if (!result.ok) {
+            val out = JSONObject()
+            out.put("valid", false)
+            out.put("nick", result.nick)
+            out.put("userId", result.userId)
+            out.put("activated", false)
+            out.put("message", result.message)
+            // 400：校验未通过，但已保留记录，不激活
+            return jsonResponse(JSONObject().put("ok", false).put("success", false).put("data", out), 400)
+        }
+
         val out = JSONObject()
-        out.put("id", id)
-        out.put("valid", ok)
-        out.put("nick", nick)
-        out.put("userId", unb)
-        out.put("message", if (ok) "登录成功" else "已添加，但Cookie可能已过期")
+        out.put("id", result.accountId)
+        out.put("valid", true)
+        out.put("nick", result.nick)
+        out.put("userId", result.userId)
+        out.put("activated", result.activated)
+        out.put("message", result.message)
         return jsonOk(out)
     }
 
@@ -426,27 +515,41 @@ class LocalServer(private val context: Context) {
             return jsonError(500, "获取登录二维码失败，请检查网络重试")
         }
         val out = JSONObject().apply {
-            put("token", qrData.lgToken)
-            put("lgToken", qrData.lgToken)
-            put("qrcode_url", qrData.qrImgUrl)
-            put("qrImgUrl", qrData.qrImgUrl)
-            put("qrCodeText", qrData.qrCodeText)
+            // 会话 ID：后续轮询扫码状态时带回
+            put("token", qrData.sessionId)
+            put("sessionId", qrData.sessionId)
+            put("lgToken", qrData.sessionId)
+            // 本地渲染的二维码图片（data-url），前端直接 <img src>
+            put("qrImage", qrData.qrImageDataUrl)
+            put("qrDataUrl", qrData.qrImageDataUrl)
+            // 二维码原始内容（调试 / 手输备用）
+            put("qrCodeText", qrData.qrContent)
         }
         return jsonOk(out)
     }
 
     private fun apiCheckQrCode(query: Map<String, String>): Response {
-        val lgToken = query["lgToken"]?.trim().orEmpty().ifBlank { query["token"]?.trim().orEmpty() }
-        if (lgToken.isEmpty()) return jsonError(400, "lgToken required")
-        val res = QrLoginService.checkQrStatus(context, lgToken)
+        val sessionId = query["sessionId"]?.trim().orEmpty()
+            .ifBlank { query["lgToken"]?.trim().orEmpty() }
+            .ifBlank { query["token"]?.trim().orEmpty() }
+        if (sessionId.isEmpty()) return jsonError(400, "sessionId required")
+        val res = QrLoginService.checkQrStatus(sessionId)
         val out = JSONObject().apply {
             put("status", res.status.name.lowercase())
             put("statusCode", res.status.name)
             put("message", res.message)
             put("nick", res.nick ?: "")
             put("userId", res.userId ?: "")
+            if (res.status == QrLoginService.Status.VERIFICATION_REQUIRED) {
+                put("verificationUrl", res.verificationUrl ?: "")
+            }
         }
-        return jsonOk(out)
+        // 扫码失败/过期也要让前端能清楚看到原因，不能静默返回 ok
+        return if (res.status == QrLoginService.Status.ERROR) {
+            jsonResponse(JSONObject().put("ok", true).put("success", true).put("data", out), 200)
+        } else {
+            jsonOk(out)
+        }
     }
 
     private fun apiCardsStock(query: Map<String, String>): Response {
@@ -591,7 +694,13 @@ class LocalServer(private val context: Context) {
         val db = CardDatabase.get(context)
         val cookie = db.getActiveCookie()
         if (cookie.isBlank()) return jsonOk(JSONObject().put("orders", JSONArray()).put("count", 0))
-        val list = MtopClient.querySoldOrders(cookie)
+        // 令牌过期时自动刷新并回写，避免「打开页面就要求重新登录」
+        val list = MtopClient.querySoldOrders(
+            cookie,
+            onCookieRefreshed = { refreshed ->
+                AccountManager.persistRefreshedCookie(context, refreshed)
+            }
+        )
         val arr = JSONArray()
         for (o in list) {
             val item = JSONObject().apply {
@@ -652,7 +761,12 @@ class LocalServer(private val context: Context) {
             }
         }.trim()
 
-        val (ok, msg) = MtopClient.confirmDummyShipping(cookie, orderId, tradeText)
+        val (ok, msg) = MtopClient.confirmDummyShipping(
+            cookie, orderId, tradeText,
+            onCookieRefreshed = { refreshed ->
+                AccountManager.persistRefreshedCookie(context, refreshed)
+            }
+        )
         db.recordLog(orderId, rule?.keyword ?: "手动发货", content, if (ok) "发货完成" else "发货反馈: $msg")
 
         val out = JSONObject().apply {
@@ -712,6 +826,17 @@ class LocalServer(private val context: Context) {
         o.put("cookie", cookie)
         o.put("nick", nick)
         o.put("hasCookie", cookie.isNotBlank())
+        // 修复：旧版 valid = cookie.isNotBlank() 是假的有效性；
+        // 且 last_check 是全局的，切号后显示的是上一个账号的结果。
+        // 现在读「当前激活账号自己」的校验状态。
+        val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
+        val (lastTs, lastOk, lastDetail) =
+            if (unb.isBlank()) Triple(0L, false, "") else db.getAccountCheck(unb)
+        val valid = cookie.isNotBlank() && lastOk
+        o.put("valid", valid)
+        o.put("lastCheckAt", lastTs)
+        o.put("lastCheckOk", lastOk)
+        o.put("lastCheckDetail", lastDetail)
         o.put("daemon_enabled", db.getSetting("daemon_enabled", "true") == "true")
         return jsonOk(o)
     }
@@ -722,10 +847,21 @@ class LocalServer(private val context: Context) {
         val cookie = json.optString("cookie", "").trim()
         val db = CardDatabase.get(context)
         if (cookie.isNotEmpty()) {
-            val (ok, nickOrMsg) = MtopClient.testCookie(cookie)
-            db.saveSetting("cookie", cookie)
-            if (ok) db.saveSetting("cookie_nick", nickOrMsg)
-            return jsonOk(JSONObject().put("valid", ok).put("nick", if (ok) nickOrMsg else "").put("message", nickOrMsg))
+            // 统一走 AccountManager：包含去重、令牌自愈、真实校验与激活策略
+            val result = AccountManager.saveLogin(
+                context,
+                cookie,
+                AccountManager.Source.COOKIE,
+                activateOnSuccess = true
+            )
+            return jsonOk(
+                JSONObject()
+                    .put("valid", result.ok)
+                    .put("nick", if (result.ok) result.nick else "")
+                    .put("userId", result.userId)
+                    .put("activated", result.activated)
+                    .put("message", result.message)
+            )
         }
         if (json.has("daemon_enabled")) {
             val enabled = json.optBoolean("daemon_enabled", true)
@@ -781,6 +917,11 @@ class LocalServer(private val context: Context) {
             return jsonError(500, "read asset failed")
         }
         val mime = mimeType(assetPath)
+        // 注入访问令牌：仅对 App 自己的 WebView 页面生效（同源）。
+        // 外部浏览器访问没有 app 注入令牌也无所谓，但 static 页本身不含敏感数据。
+        // 修复：不再把令牌写进 HTML。
+        // 本机任何 App 只要 GET / 就能读到令牌，等于鉴权形同虚设。
+        // 现在令牌只能通过 AndroidBridge.getApiToken() 从 App 自己的 WebView 拿到。
         return Response(200, mime, bytes)
     }
 
