@@ -11,29 +11,41 @@ android {
         applicationId = "com.xianyu.copilot"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3.0"
+        versionCode = 5
+        versionName = "1.3.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // 签名配置全部从环境变量读取，仓库里不再有任何 keystore 与明文密码。
+    // CI 运行时由 Actions Secrets 注入并把 keystore 解码到临时文件。
+    // 本地构建若未提供变量，则回退到 debug 签名（仅调试用，不可发布）。
+    val ksPath = System.getenv("XIANYU_KS_PATH").orEmpty()
+    val ksStorePass = System.getenv("XIANYU_KS_PASS").orEmpty()
+    val ksKeyAlias = System.getenv("XIANYU_KS_ALIAS").orEmpty().ifEmpty { "xianyu" }
+    val ksKeyPass = System.getenv("XIANYU_KEY_PASS").orEmpty().ifEmpty { ksStorePass }
+    val hasReleaseKey = ksPath.isNotBlank() && file(ksPath).exists() && ksStorePass.isNotBlank()
+
     signingConfigs {
-        create("release") {
-            storeFile = file("../xianyu.jks")
-            storePassword = "cookiebox123"
-            keyAlias = "cookiebox"
-            keyPassword = "cookiebox123"
-            enableV1Signing = true
-            enableV2Signing = true
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(ksPath)
+                storePassword = ksStorePass
+                keyAlias = ksKeyAlias
+                keyPassword = ksKeyPass
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKey) signingConfig = signingConfigs.getByName("release")
         }
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKey) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
