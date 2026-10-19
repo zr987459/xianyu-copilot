@@ -840,7 +840,10 @@ class LocalServer(private val context: Context) {
                 put("source", it.source)
             })
         }
-        return jsonOk(JSONObject().put("items", arr).put("count", arr.length()).put("ok", ok))
+        if (!ok && arr.length() == 0) {
+            return jsonError(400, "获取在售宝贝失败，请检查账号是否有效或网络连接")
+        }
+        return jsonOk(JSONObject().put("items", arr).put("count", arr.length()).put("ok", true))
     }
 
     private fun apiUploadImage(body: String): Response {

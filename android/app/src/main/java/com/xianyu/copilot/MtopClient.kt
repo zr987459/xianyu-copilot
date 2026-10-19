@@ -697,6 +697,7 @@ object MtopClient {
         if (cookie.isBlank()) return false to "未绑定账号"
         if (title.isBlank()) return false to "标题不能为空"
         if (price <= 0.0) return false to "价格需大于 0"
+        if (images.isEmpty()) return false to "请至少上传一张商品主图"
 
         val imgList = JSONArray()
         images.forEachIndexed { idx, img ->
@@ -715,7 +716,16 @@ object MtopClient {
             })
         }
 
-        val priceCent = (price * 100).toLong().toString()
+        // 修复浮点精度截断（避免 19.99 截成 1998 分）
+        val priceCent = try {
+            java.math.BigDecimal(price.toString())
+                .multiply(java.math.BigDecimal(100))
+                .setScale(0, java.math.RoundingMode.HALF_UP)
+                .toLong().toString()
+        } catch (_: Exception) {
+            Math.round(price * 100).toString()
+        }
+
         val data = JSONObject().apply {
             put("freebies", false)
             put("itemTypeStr", "b")
@@ -731,15 +741,14 @@ object MtopClient {
                 put("origPriceInCent", priceCent)
                 put("priceInCent", priceCent)
             })
+            // 修复：虚拟商品无需邮寄运费设置（supportFreight=false）
             put("itemPostFeeDTO", JSONObject().apply {
                 put("canFreeShipping", true)
-                put("supportFreight", true)
+                put("supportFreight", false)
                 put("onlyTakeSelf", false)
             })
-            put("itemAddrDTO", JSONObject().apply {
-                put("divisionId", "310100")
-                put("gps", "31.230416,121.473701")
-            })
+            // 修复：不伪造上海 GPS/行政区划，由平台按账号默认设置定位
+            put("itemAddrDTO", JSONObject())
             put("uniqueCode", "${System.currentTimeMillis()}")
             put("sourceId", "pcMainPublish")
             put("bizcode", "pcMainPublish")

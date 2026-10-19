@@ -12,13 +12,27 @@ import android.view.KeyEvent
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.FrameLayout
+import android.webkit.ValueCallback
 import android.widget.ImageButton
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private val handler = Handler(Looper.getMainLooper())
+
+    /** 未消费的图片选择回调，WebView 同一时刻只允许一个，需显式取消旧调用避免泄漏。 */
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    private val pickImagesLauncher = registerForActivityResult(
+        ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        val cb = fileChooserCallback
+        fileChooserCallback = null
+        // 用户取消时必须回 null，否则网页 input 永久卡住
+        cb?.onReceiveValue(if (uris.isNullOrEmpty()) null else uris.toTypedArray())
+    }
 
     inner class AndroidBridge {
         @JavascriptInterface
@@ -75,7 +89,26 @@ class MainActivity : AppCompatActivity() {
             }
             clearCache(true)
             addJavascriptInterface(AndroidBridge(), "AndroidBridge")
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    if (filePathCallback == null) return false
+                    // 取消上一次未消费的回调，防止 input 状态卡死
+                    fileChooserCallback?.onReceiveValue(null)
+                    fileChooserCallback = filePathCallback
+                    return try {
+                        pickImagesLauncher.launch("image/*")
+                        true
+                    } catch (e: Exception) {
+                        fileChooserCallback = null
+                        filePathCallback.onReceiveValue(null)
+                        false
+                    }
+                }
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val url = request?.url?.toString() ?: return false
@@ -294,6 +327,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        fileChooserCallback?.onReceiveValue(null)
+        fileChooserCallback = null
         webView.destroy()
     }
 }

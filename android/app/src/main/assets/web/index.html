@@ -953,24 +953,51 @@ function chooseImages(){
   if(inp) inp.click();
 }
 
+function compressImage(file){
+  return new Promise(function(resolve, reject){
+    var img = new Image();
+    var url = URL.createObjectURL(file);
+    img.onload = function(){
+      URL.revokeObjectURL(url);
+      var MAX = 1400;
+      var w = img.naturalWidth || img.width || 800;
+      var h = img.naturalHeight || img.height || 800;
+      var scale = Math.min(1, MAX / Math.max(w, h));
+      var dw = Math.round(w * scale);
+      var dh = Math.round(h * scale);
+      var cvs = document.createElement('canvas');
+      cvs.width = dw; cvs.height = dh;
+      var ctx = cvs.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, dw, dh);
+      ctx.drawImage(img, 0, 0, dw, dh);
+      try {
+        var dataUrl = cvs.toDataURL('image/jpeg', 0.85);
+        resolve({ dataUrl: dataUrl, width: dw, height: dh });
+      } catch(e){ reject(e); }
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('图片解析失败')); };
+    img.src = url;
+  });
+}
+
 function onImageChosen(files){
   if(!files || !files.length) return;
   var file = files[0];
-  var reader = new FileReader();
-  toast('正在读取图片…', 1200);
-  reader.onload = function(e){
-    var b64 = e.target.result;
-    toast('正在上传图片到闲鱼图床…', 3000);
-    api('/api/publish/upload_image', { method:'POST', body:{ image: b64, filename: file.name } })
-      .then(function(d){
-        uploadedImages.push({ url: d.url, width: d.width || 800, height: d.height || 800 });
-        renderUploadGrid();
-        toast('图片上传成功！');
-      }).catch(function(err){
-        toast('图片上传失败: ' + err.message);
-      });
-  };
-  reader.readAsDataURL(file);
+  toast('正在压缩处理图片…', 1500);
+  compressImage(file).then(function(res){
+    toast('正在直传到闲鱼图床…', 4000);
+    return api('/api/publish/upload_image', {
+      method: 'POST',
+      body: { image: res.dataUrl, filename: file.name, width: res.width, height: res.height }
+    }).then(function(d){
+      uploadedImages.push({ url: d.url, width: d.width || res.width, height: d.height || res.height });
+      renderUploadGrid();
+      toast('图片上传成功！');
+    });
+  }).catch(function(err){
+    toast('上传失败: ' + err.message);
+  });
 }
 
 function removeUploadedImage(idx){
@@ -1001,6 +1028,7 @@ function publishItem(){
   var title = $('#pTitle').value.trim();
   var price = $('#pPrice').value.trim();
   var desc = $('#pDesc').value.trim();
+  if(!uploadedImages.length){ toast('请至少上传一张商品主图'); return; }
   if(!title){ toast('请填写商品标题'); return; }
   if(!price){ toast('请填写售价'); return; }
 
