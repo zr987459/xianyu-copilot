@@ -2,9 +2,12 @@ package com.xianyu.copilot
 
 import android.util.Log
 import okhttp3.FormBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -34,14 +37,36 @@ object MtopClient {
             .build()
     }
 
-    /** 待发货订单数据模型。 */
+    /** 待发货订单数据模型（增强买家信息）。 */
     data class SoldOrder(
         val orderId: String,
         val title: String,
         val sku: String,
         val buyerNick: String,
         val status: String,
-        val quantity: Int = 1
+        val quantity: Int = 1,
+        val price: String = "",
+        val buyerCity: String = "",
+        val buyerMessage: String = "",
+        val createTime: String = ""
+    )
+
+    /** 在售商品统一数据模型。 */
+    data class OnSaleItem(
+        val id: String,
+        val title: String,
+        val price: String,
+        val imageUrl: String,
+        val status: String,
+        val detailUrl: String,
+        val source: String
+    )
+
+    /** 上传成功的图片信息。 */
+    data class UploadedImage(
+        val url: String,
+        val widthSize: Int = 800,
+        val heightSize: Int = 800
     )
 
     // ---------------- 核心请求 ----------------
