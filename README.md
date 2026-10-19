@@ -1,43 +1,44 @@
 # 🐟 Xianyu Copilot (闲鱼智能协同与全自动化运营系统)
 
 [![GitHub stars](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Android App](https://img.shields.io/badge/Android-Standalone%20APK-3DDC84.svg?logo=android&logoColor=white)](android/)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-Mobile%20First-38B2AC.svg)](https://tailwindcss.com/)
 
-> 专为闲鱼个人卖家与店主打造的全自动化协同与运营管家。深度对标 `zhinianboke/xianyu-auto-reply` 与 `xianyu-mobile`，提供高颜值移动端 UI、多专家 AI 阶梯砍价客服、复合模式自动发货（网盘链接+独立卡密池双发）以及免浏览器单品一键上架发布。
+> 专为闲鱼个人卖家与店主打造的全自动化协同与运营管家。深度对标 `zhinianboke/xianyu-auto-reply` 与 `xianyu-mobile`，提供高颜值移动端 UI、复合模式自动发货（网盘链接+独立卡密池双发）、免浏览器单品一键上架发布，并支持**纯安卓独立版 APK（后台常驻守护，无需命令行）**！
 
 ---
 
 ## 🌟 核心特性
 
-### 1. 📱 深度对标 xianyu-mobile 的移动端 UI
-- **4 大标准底部导航 Tab**：
-  - **消息 (Messages)**：实时会话列表、多轮人机交互气泡、议价轮次标记与搜索。
-  - **订单 (Orders)**：订单状态流转（待付款 / 待发货 / 已发货）、单号复制与快速查验。
-  - **商品与发货 (Products & Delivery)**：
-    - **卡密资产池**：支持**单码快捷录入**与**多行批量导入**，实时追踪每一张卡密的状态（🟢 在库就绪 vs 🔴 已发放核销及对应订单号）。
-    - **复合发货规则**：支持同时下发固定内容（如网盘链接、解压密码、安装教程）+ 抽取一张独享卡密。
-    - **一键上架发布**：流式上传图片至阿里官方图床，免浏览器调用发布接口。
-  - **我的设置 (Mine & Settings)**：账号保鲜状态、4 大核心指标卡片、AI 专家 Prompt 在线热更新。
+### 1. 📱 纯安卓独立版 APK (android/)
+- **免启动、零命令行**：无需 Termux，无需 PRoot，无需在电脑或终端敲命令，直接安装 APK 即可在手机独立运行；
+- **常驻后台守护服务 (Foreground DaemonService)**：系统通知栏常驻小图标，24 小时后台循环监测待发货订单，点击随时唤醒控制台；
+- **同源嵌入式引擎**：基于 Kotlin + OkHttp3 + ServerSocket 内嵌运行于 `http://127.0.0.1:9005`，零跨域、零文件协议限制；
+- **永久固定签名证书**：采用固定密钥打包，后续更新升级支持平滑无感覆盖安装。
 
-### 2. 🤖 多专家 Agent 协同砍价与客服
-- **多模型协议中立**：原生支持 Anthropic-messages 与 OpenAI 规范，支持提取并过滤 `thinking` 思维链。
-- **阶梯博弈**：根据砍价轮次动态调节温度与让步幅度，死守利润底线。
-- **一键人工接管**：闲鱼私聊发送句号 `。` 即可随时在 AI 值守与真人代管之间无缝切换。
+### 2. 🎫 卡密资产池与原子防超卖出库
+- **单码录入与批量导入**：支持区分套餐/规格 (SKU)，卡密库存状态清晰（在库就绪 vs 已发放核销及关联订单号）；
+- **Hark 架构审查加固**：采用 `BEGIN IMMEDIATE` 写锁与单语句 CAS 抢占（`UPDATE ... WHERE id=(SELECT id ... LIMIT 1) AND is_used=0`），从根源杜绝高并发超卖；
+- **全链路幂等**：订单重复推送或网络重试自动返回已绑定卡密，绝不二次克隆出库。
 
 ### 3. ⚡ 官方协议无需物流自动发货
-- 毫秒级监听订单付款事件。
-- 自动调用官方 `mtop.taobao.idle.logistic.consign.dummy/1.0/` 接口确认发货。
-- 发货日志全流程追踪，卡密绝不重复发放。
+- 自动监听「买家已付款 / 等待发货」订单；
+- 复合发货规则：支持同时下发固定内容（如网盘链接、激活说明、解压密码）+ 抽取一张独享卡密；
+- 自动调用官方 `mtop.taobao.idle.logistic.consign.dummy/1.0/` 接口确认发货并自动留档。
+
+### 4. 🚀 免浏览器一键上架发布
+- 免打开淘宝或闲鱼 App，在控制台输入标题、售价、原价与宝贝描述，直接调用发布协议一键上架至店铺。
 
 ---
 
-## 🚀 极速启动
+## 🚀 两种使用方式
 
-### 环境要求
-- Python 3.10+
-- 手机端 Termux / PRoot Linux 或 任何 Linux 云服务器均可秒级启动
+### 方式一：手机直接安装纯安卓独立版 (推荐)
+前往 [Releases 页面](https://github.com/zr987459/xianyu-copilot/releases) 下载 `XianyuCopilot.apk`，安装后打开即可使用，后台常驻守护，零外部依赖！
+
+### 方式二：Python 服务端运行 (Docker / Linux 云服务器)
 
 ### 安装与运行
 ```bash
