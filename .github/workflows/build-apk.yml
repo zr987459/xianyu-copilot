@@ -1,0 +1,83 @@
+name: Build Xianyu Copilot APK
+
+on:
+  push:
+    branches: [ "main", "feat/**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-xianyu-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Release Mobile APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant Execute Permission for Gradlew
+        run: |
+          chmod +x android/gradlew
+
+      - name: Build Android Release APK
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/*.apk ../dist/XianyuCopilot.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XianyuCopilot-APK
+          path: dist/XianyuCopilot.apk
+          retention-days: 14
+
+      - name: Publish APK to GitHub Releases
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: "Xianyu Copilot v1.0.0 (闲鱼管家 · 纯安卓独立版)"
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          files: dist/XianyuCopilot.apk
+          body: |
+            ### 🐟 闲鱼管家 Xianyu Copilot (纯安卓独立版 v1.0.0)
+
+            告别命令行与终端，无需 Termux / PRoot，安装 APK 点开即用！
+
+            - ⚡ **100% 独立离线自洽架构**：
+              - 采用 Kotlin 原生 OkHttp3 协议引擎与 ServerSocket 内置微型服务；
+              - 零 Python、零 Node 依赖，安装包轻量小巧；
+            - 🔔 **常驻后台自动发货守护 (DaemonService)**：
+              - 状态栏常驻守护通知，实时监测「等待发货」订单；
+              - 循环扫描、自动匹配发货规则；
+            - 🎫 **卡密资产池与复合发货**：
+              - 支持单码录入与多行批量导入；
+              - SQLite 事务锁出库，严格防止并发超卖；
+              - 支持「独享卡密 + 固定网盘/教程说明」复合发货；
+              - 调用闲鱼官方无需物流虚拟发货接口确认发货并自动留档；
+            - 🚀 **免浏览器一键发布上架**：
+              - 设置宝贝标题、价格与描述，直接一键发布上架至店铺；
+            - 🔑 **Cookie 状态检测与保鲜**：
+              - 支持一键测试 Cookie 状态并显示掌柜账号；
+            - 🛡️ **固定永久签名证书打包**：
+              - 采用固定签名密钥体系，后续迭代版本支持手机无感平滑覆盖升级。
+
+            *点击下方 Assets 里的 `XianyuCopilot.apk` 即可下载安装！*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

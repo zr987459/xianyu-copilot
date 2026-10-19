@@ -115,7 +115,10 @@ def _proc(db, base, q):
 
 def test_processes_multi_qty_no_oversell(db):
     ctx = mp.get_context("spawn")
-    q = ctx.Queue()
+    try:
+        q = ctx.Queue()
+    except (FileNotFoundError, OSError):
+        pytest.skip("multiprocessing.Queue unavailable (no /dev/shm in PRoot)")
     ps = [ctx.Process(target=_proc, args=(db, k * 100, q)) for k in range(4)]
     [p.start() for p in ps]
     got = sum((q.get(timeout=60) for _ in ps), []); [p.join() for p in ps]
