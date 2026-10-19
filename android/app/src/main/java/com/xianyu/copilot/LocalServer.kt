@@ -361,8 +361,9 @@ class LocalServer(private val context: Context) {
                 path == "/api/delivery/logs" || path == "/api/orders" || path == "/api/delivery/orders" -> apiGetOrders()
                 path == "/api/orders/waiting" -> apiGetWaitingOrders()
                 path == "/api/delivery/ship_now" -> if (req.method == "POST") apiShipNow(req.body) else methodNotAllowed()
-                path == "/api/publish/item" || path == "/api/publish" -> apiPublish(req.body)
-                path == "/api/publish/list" -> jsonOk(JSONObject().put("items", JSONArray()))
+                path == "/api/items/on_sale" || path == "/api/publish/list" -> apiGetOnSaleItems(req.query)
+                path == "/api/publish/upload_image" -> if (req.method == "POST") apiUploadImage(req.body) else methodNotAllowed()
+                path == "/api/publish/item" || path == "/api/publish" -> if (req.method == "POST") apiPublish(req.body) else methodNotAllowed()
                 path == "/api/config" || path == "/api/cookie" -> when (req.method) {
                     "GET" -> apiGetConfig()
                     "POST" -> apiPostConfig(req.body)
@@ -722,6 +723,10 @@ class LocalServer(private val context: Context) {
                 put("buyer", o.buyerNick)
                 put("status", o.status)
                 put("quantity", o.quantity)
+                put("price", o.price)
+                put("buyerCity", o.buyerCity)
+                put("buyerMessage", o.buyerMessage)
+                put("createTime", o.createTime)
             }
             arr.put(item)
         }
@@ -811,23 +816,102 @@ class LocalServer(private val context: Context) {
         return jsonOk(out)
     }
 
+    private fun apiGetOnSaleItems(query: Map<String, String>): Response {
+        val db = CardDatabase.get(context)
+        val cookie = db.getActiveCookie()
+        if (cookie.isBlank()) return jsonOk(JSONObject().put("items", JSONArray()).put("count", 0))
+        val page = query["page"]?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val (ok, list) = MtopClient.queryOnSaleItems(
+            cookie = cookie,
+            page = page,
+            onCookieRefreshed = { refreshed ->
+                AccountManager.persistRefreshedCookie(context, refreshed)
+            }
+        )
+        val arr = JSONArray()
+        for (it in list) {
+            arr.put(JSONObject().apply {
+                put("id", it.id)
+                put("title", it.title)
+                put("price", it.price)
+                put("imageUrl", it.imageUrl)
+                put("status", it.status)
+                put("detailUrl", it.detailUrl)
+                put("source", it.source)
+            })
+        }
+        return jsonOk(JSONObject().put("items", arr).put("count", arr.length()).put("ok", ok))
+    }
+
+    private fun apiUploadImage(body: String): Response {
+        val json = try { JSONObject(body) } catch (_: Exception) { null }
+            ?: return jsonError(400, "invalid json")
+        val raw = json.optString("data", "").ifBlank { json.optString("image", "") }
+        if (raw.isBlank()) return jsonError(400, "image data required")
+
+        val b64 = if (raw.contains(",")) raw.substringAfter(',') else raw
+        val bytes = try {
+            android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        } catch (_: Exception) { return jsonError(400, "invalid base64 image") }
+
+        val db = CardDatabase.get(context)
+        val cookie = db.getActiveCookie()
+        if (cookie.isBlank()) return jsonError(400, "未绑定闲鱼账号")
+
+        val filename = json.optString("filename", "img_${System.currentTimeMillis()}.jpg")
+        val (ok, img) = MtopClient.uploadImage(cookie, bytes, filename)
+        if (!ok || img == null) return jsonError(500, "图片上传到闲鱼图床失败，请检查网络")
+
+        val out = JSONObject().apply {
+            put("url", img.url)
+            put("width", img.widthSize)
+            put("height", img.heightSize)
+        }
+        return jsonOk(out)
+    }
+
     private fun apiPublish(body: String): Response {
         val json = try { JSONObject(body) } catch (_: Exception) { null }
             ?: return jsonError(400, "invalid json")
         val db = CardDatabase.get(context)
-        val cookie = db.getSetting("cookie", "")
-        if (cookie.isBlank()) return jsonError(400, "请先在设置中填写闲鱼 Cookie")
+        val cookie = db.getActiveCookie()
+        if (cookie.isBlank()) return jsonError(400, "未绑定闲鱼账号")
 
         val title = json.optString("title", "").trim()
-        val price = json.optString("price", "").trim()
+        val price = json.optDouble("price", 0.0)
         val desc = json.optString("desc", "").trim()
-        val categoryId = json.optString("categoryId", "").ifBlank { json.optString("category_id", "") }.trim()
 
-        val (ok, res) = MtopClient.publishItem(cookie, title, price, desc, categoryId)
-        val out = JSONObject()
-        out.put("ok", ok)
-        out.put("message", res)
-        return jsonResponse(out)
+        val imgArr = json.optJSONArray("images")
+        val images = ArrayList<MtopClient.UploadedImage>()
+        if (imgArr != null) {
+            for (i in 0 until imgArr.length()) {
+                val item = imgArr.opt(i)
+                if (item is JSONObject) {
+                    val u = item.optString("url")
+                    val w = item.optInt("width", 800)
+                    val h = item.optInt("height", 800)
+                    if (u.isNotBlank()) images.add(MtopClient.UploadedImage(u, w, h))
+                } else if (item is String && item.isNotBlank()) {
+                    images.add(MtopClient.UploadedImage(item))
+                }
+            }
+        }
+
+        val (ok, res) = MtopClient.publishItem(
+            cookie = cookie,
+            title = title,
+            desc = desc,
+            price = price,
+            images = images,
+            onCookieRefreshed = { refreshed ->
+                AccountManager.persistRefreshedCookie(context, refreshed)
+            }
+        )
+        val out = JSONObject().apply {
+            put("ok", ok)
+            put("message", res)
+        }
+        return if (ok) jsonOk(out) else jsonError(400, res)
     }
 
     private fun apiGetConfig(): Response {

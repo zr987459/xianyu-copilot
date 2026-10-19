@@ -474,7 +474,11 @@ object MtopClient {
             val status = firstNonBlank(o, "orderStatus", "status", "orderStatusName") ?: ""
             val qtyStr = firstNonBlank(o, "buyAmount", "buyQuantity", "itemNum", "quantity", "count")
             val qty = qtyStr?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-            out.add(SoldOrder(orderId, title, sku, buyer, status, qty))
+            val price = firstNonBlank(o, "actualPayFee", "totalPrice", "orderPrice", "price", "amount") ?: ""
+            val city = firstNonBlank(o, "receiverCity", "buyerCity", "city", "provCity", "buyerLocation") ?: ""
+            val msg = firstNonBlank(o, "buyerMessage", "buyerRemark", "memo", "note", "message") ?: ""
+            val cTime = firstNonBlank(o, "createTime", "orderCreateTime", "orderTime", "gmtCreate", "payTime") ?: ""
+            out.add(SoldOrder(orderId, title, sku, buyer, status, qty, price, city, msg, cTime))
         }
         return out
     }
@@ -487,44 +491,247 @@ object MtopClient {
         return null
     }
 
+    // ==================== 在售商品列表 ====================
+
     /**
-     * 闲鱼免浏览器上架接口。
-     * @return Pair(是否成功, 商品 ID 或错误信息)
+     * 查询在售商品列表（个人版优先，明确报错且非风控才回退鱼小铺）。
      */
+    fun queryOnSaleItems(
+        cookie: String,
+        page: Int = 1,
+        pageSize: Int = 20,
+        onCookieRefreshed: ((String) -> Unit)? = null,
+        onResult: ((Boolean, String) -> Unit)? = null
+    ): Pair<Boolean, List<OnSaleItem>> {
+        if (cookie.isBlank()) return false to emptyList()
+        val userId = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
+
+        // 1) 个人版优先
+        val personalData = JSONObject().apply {
+            put("needGroupInfo", false)
+            put("pageNumber", page)
+            put("pageSize", pageSize)
+            put("groupName", "在售")
+            put("groupId", "58877261")
+            put("defaultGroup", true)
+            if (userId.isNotBlank()) put("userId", userId)
+        }
+        val personal = callMtop(
+            cookie = cookie,
+            api = "mtop.idle.web.xyh.item.list",
+            version = "1.0",
+            dataObj = personalData,
+            extraQuery = mapOf("spm_cnt" to "a21ybx.im.0.0"),
+            onCookieRefreshed = onCookieRefreshed,
+            onResult = onResult
+        )
+        if (personal.success) {
+            val items = mapPersonalItems(personal.json)
+            Log.i(TAG, "queryOnSaleItems 个人版成功，获取 ${items.size} 件")
+            return true to items
+        }
+
+        // 风控错误绝不回退
+        if (isRiskControl(personal.retCode.ifBlank { personal.message })) {
+            Log.w(TAG, "queryOnSaleItems 个人版触碰风控，终止回退: ${personal.retCode}")
+            return false to emptyList()
+        }
+
+        // 2) 鱼小铺回退
+        Log.i(TAG, "queryOnSaleItems 个人版非风控失败(${personal.retCode})，回退鱼小铺")
+        val shopData = JSONObject().apply {
+            put("pageNo", page)
+            put("pageSize", pageSize)
+            put("bizType", "commonPro")
+            put("searchRequest", "{}")
+            put("itemStatus", "0")
+        }
+        val shop = callMtop(
+            cookie = cookie,
+            api = "mtop.alibaba.idle.seller.pc.common.item.search",
+            version = "1.0",
+            dataObj = shopData,
+            extraQuery = mapOf("needLoginPC" to "true", "accountSite" to "xianyu"),
+            onCookieRefreshed = onCookieRefreshed,
+            onResult = onResult
+        )
+        if (shop.success) {
+            val items = mapShopItems(shop.json)
+            return true to items
+        }
+        return false to emptyList()
+    }
+
+    private val RISK_MARKERS = arrayOf("RGV587_ERROR", "FAIL_SYS_USER_VALIDATE", "LIMIT", "captcha", "被挤爆")
+    private fun isRiskControl(msg: String): Boolean = RISK_MARKERS.any { msg.contains(it, ignoreCase = true) }
+
+    private fun mapPersonalItems(root: JSONObject?): List<OnSaleItem> {
+        val data = root?.optJSONObject("data") ?: return emptyList()
+        val cards = data.optJSONArray("cardList") ?: return emptyList()
+        val out = ArrayList<OnSaleItem>(cards.length())
+        for (i in 0 until cards.length()) {
+            val card = cards.optJSONObject(i)?.optJSONObject("cardData") ?: continue
+            val id = card.optString("id").ifBlank { card.optString("itemId") }
+            if (id.isBlank()) continue
+            val title = card.optString("title")
+            val price = card.optJSONObject("priceInfo")?.optString("price").orEmpty()
+                .ifBlank { card.optString("price") }
+            val picUrl = card.optJSONObject("picInfo")?.optString("url").orEmpty()
+                .ifBlank { card.optJSONObject("picInfo")?.optString("picUrl").orEmpty() }
+            val status = if (card.optInt("itemStatus") == 0) "在售" else "已下架"
+            val detailUrl = "https://www.goofish.com/item?id=$id"
+            out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "personal"))
+        }
+        return out
+    }
+
+    private fun mapShopItems(root: JSONObject?): List<OnSaleItem> {
+        val data = root?.optJSONObject("data")?.optJSONObject("data") ?: return emptyList()
+        val list = data.optJSONArray("itemSearchResponseList") ?: return emptyList()
+        val out = ArrayList<OnSaleItem>(list.length())
+        for (i in 0 until list.length()) {
+            val o = list.optJSONObject(i) ?: continue
+            val id = o.optString("itemId")
+            if (id.isBlank()) continue
+            val title = o.optString("title")
+            val price = o.optString("reservePrice")
+            val picUrl = o.optString("itemImageUrl")
+            val status = o.optString("itemStatusDesc").ifBlank { "在售" }
+            val detailUrl = "https://www.goofish.com/item?id=$id"
+            out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "shop"))
+        }
+        return out
+    }
+
+    // ==================== 图片直传 ====================
+
+    private const val STREAM_UPLOAD_URL =
+        "https://stream-upload.goofish.com/api/upload.api?floderId=0&appkey=fleamarket&_input_charset=utf-8"
+
+    /**
+     * 上传图片到闲鱼官方图床。
+     */
+    fun uploadImage(
+        cookie: String,
+        bytes: ByteArray,
+        filename: String = "upload.jpg"
+    ): Pair<Boolean, UploadedImage?> {
+        if (cookie.isBlank() || bytes.isEmpty()) return false to null
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds) }
+        val w = if (bounds.outWidth > 0) bounds.outWidth else 800
+        val h = if (bounds.outHeight > 0) bounds.outHeight else 800
+
+        val mediaType = "image/jpeg".toMediaTypeOrNull()
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("file", filename, bytes.toRequestBody(mediaType))
+            .build()
+
+        val req = Request.Builder()
+            .url(STREAM_UPLOAD_URL)
+            .header("Cookie", cookie)
+            .header("Origin", "https://seller.goofish.com")
+            .header("Referer", "https://seller.goofish.com/?site=COMMONPRO")
+            .header("User-Agent", UA)
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Accept", "*/*")
+            .post(body)
+            .build()
+
+        return try {
+            client.newCall(req).execute().use { resp ->
+                val txt = resp.body?.string().orEmpty()
+                val json = runCatching { JSONObject(txt) }.getOrNull() ?: return false to null
+                val obj = json.optJSONObject("object") ?: json
+                val url = obj.optString("url")
+                if (url.isNotBlank()) {
+                    true to UploadedImage(url, w, h)
+                } else {
+                    Log.w(TAG, "uploadImage 失败: $txt")
+                    false to null
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "uploadImage exception", e)
+            false to null
+        }
+    }
+
+    // ==================== 发布商品 ====================
+
     fun publishItem(
         cookie: String,
         title: String,
-        price: String,
         desc: String,
-        categoryId: String
+        price: Double,
+        images: List<UploadedImage> = emptyList(),
+        onCookieRefreshed: ((String) -> Unit)? = null,
+        onResult: ((Boolean, String) -> Unit)? = null
     ): Pair<Boolean, String> {
-        if (cookie.isBlank()) return false to "Cookie 为空"
-        if (title.isBlank()) return false to "标题为空"
-        return try {
-            val data = JSONObject().apply {
+        if (cookie.isBlank()) return false to "未绑定账号"
+        if (title.isBlank()) return false to "标题不能为空"
+        if (price <= 0.0) return false to "价格需大于 0"
+
+        val imgList = JSONArray()
+        images.forEachIndexed { idx, img ->
+            imgList.put(JSONObject().apply {
+                put("url", img.url)
+                put("heightSize", img.heightSize)
+                put("widthSize", img.widthSize)
+                put("major", idx == 0)
+                put("type", 0)
+                put("status", "done")
+                put("extraInfo", JSONObject().apply {
+                    put("isH", "false")
+                    put("isT", "false")
+                    put("raw", "false")
+                })
+            })
+        }
+
+        val priceCent = (price * 100).toLong().toString()
+        val data = JSONObject().apply {
+            put("freebies", false)
+            put("itemTypeStr", "b")
+            put("quantity", "1")
+            put("simpleItem", "true")
+            put("imageInfoDOList", imgList)
+            put("itemTextDTO", JSONObject().apply {
                 put("title", title)
                 put("desc", desc)
-                put("price", price)
-                put("quantity", 1)
-                put("categoryId", categoryId)
-                put("itemType", "b")
-                put("imageUrls", JSONArray())
-                put("deliveryWay", 1) // 无需物流
-            }
-            val r = callMtop(
-                cookie = cookie,
-                api = "mtop.taobao.idle.item.publish",
-                version = "1.0",
-                dataObj = data
-            )
-            if (!r.success) return false to r.message
-            val itemId = r.json?.optJSONObject("data")
-                ?.let { d -> firstNonBlank(d, "itemId", "id", "item_id") }
-                ?: "发布成功"
-            true to itemId
-        } catch (e: Exception) {
-            Log.e(TAG, "publishItem error", e)
-            false to "异常: ${e.message}"
+            })
+            put("itemLabelExtList", JSONArray())
+            put("itemPriceDTO", JSONObject().apply {
+                put("origPriceInCent", priceCent)
+                put("priceInCent", priceCent)
+            })
+            put("itemPostFeeDTO", JSONObject().apply {
+                put("canFreeShipping", true)
+                put("supportFreight", true)
+                put("onlyTakeSelf", false)
+            })
+            put("itemAddrDTO", JSONObject().apply {
+                put("divisionId", "310100")
+                put("gps", "31.230416,121.473701")
+            })
+            put("uniqueCode", "${System.currentTimeMillis()}")
+            put("sourceId", "pcMainPublish")
+            put("bizcode", "pcMainPublish")
+            put("publishScene", "pcMainPublish")
         }
+
+        val r = callMtop(
+            cookie = cookie,
+            api = "mtop.idle.pc.idleitem.publish",
+            version = "1.0",
+            dataObj = data,
+            extraQuery = mapOf("spm_cnt" to "a21ybx.publish.0.0"),
+            onCookieRefreshed = onCookieRefreshed,
+            onResult = onResult
+        )
+        if (!r.success) return false to r.message
+        val itemId = r.json?.optJSONObject("data")?.let { firstNonBlank(it, "itemId", "id") }.orEmpty()
+        return true to (if (itemId.isNotBlank()) "发布成功！商品ID: $itemId" else "商品发布成功")
     }
 }
