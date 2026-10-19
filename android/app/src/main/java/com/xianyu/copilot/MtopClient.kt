@@ -170,35 +170,29 @@ object MtopClient {
         extraQuery: Map<String, String> = emptyMap(),
         onCookieRefreshed: ((String) -> Unit)? = null,
         onResult: ((Boolean, String) -> Unit)? = null,
-        /**
-         * 是否允许拿库里该账号的 cookie 作为刷新基准。
-         * 登录校验时必须为 false：此时库里是「旧会话」，用它做基准会把刚登录的新 cookie
-         * 顺回旧的，或把新令牌拼到已失效的 cookie2/sgcookie 上导致新登录被判失败。
-         */
-        allowStoredBase: Boolean = true
+        allowStoredBase: Boolean = true,
+        origin: String = ORIGIN,
+        referer: String = "$ORIGIN/",
+        extraHeaders: Map<String, String> = emptyMap()
     ): ApiResult {
         val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
 
         fun finish(success: Boolean, message: String, json: JSONObject?, retCode: String): ApiResult {
-            // 每次调用的最终结果都回调出去，供守护层写账号健康状态
             onResult?.invoke(success, retCode.ifBlank { message })
             return ApiResult(success, message, json, retCode)
         }
 
-        val first = callMtopOnce(cookie, api, version, dataObj, extraQuery)
+        val first = callMtopOnce(cookie, api, version, dataObj, extraQuery, origin, referer, extraHeaders)
         if (!first.tokenExpired) {
             return finish(first.success, first.message, first.json, first.retCode)
         }
 
-        // 令牌过期 / 为空：在账号锁内完成刷新，避免并发互盖
         synchronized(lockFor(unb)) {
-            // 拿锁后重新校一下：若别人已刷新，直接用新令牌重签即可
             val baseCookie = (if (allowStoredBase) currentCookieFor(unb) else null) ?: cookie
             val oldToken = MtopSigner.parseCookies(baseCookie)["_m_h5_tk"]
 
-            // 先尝试用最新 cookie 直接重签（可能是别人刚刷新的）
             if (baseCookie != cookie) {
-                val retry = callMtopOnce(baseCookie, api, version, dataObj, extraQuery)
+                val retry = callMtopOnce(baseCookie, api, version, dataObj, extraQuery, origin, referer, extraHeaders)
                 if (!retry.tokenExpired && retry.success) {
                     onCookieRefreshed?.invoke(baseCookie)
                     return finish(retry.success, retry.message, retry.json, retry.retCode)
@@ -208,7 +202,6 @@ object MtopClient {
             val merged = mergeSetCookie(baseCookie, first.setCookies)
             val newToken = MtopSigner.parseCookies(merged)["_m_h5_tk"]
             if (merged == baseCookie || newToken == oldToken) {
-                // 没拿到新令牌：令牌刷新也救不回来 ⇒ 登录态已失效
                 Log.w(TAG, "callMtop($api) 令牌未能刷新，判定登录态失效: ${first.retCode}")
                 return finish(false, first.message, first.json, first.retCode)
             }
@@ -216,7 +209,7 @@ object MtopClient {
             Log.i(TAG, "callMtop($api) 令牌已刷新，重签重试一次")
             onCookieRefreshed?.invoke(merged)
 
-            val retry = callMtopOnce(merged, api, version, dataObj, extraQuery)
+            val retry = callMtopOnce(merged, api, version, dataObj, extraQuery, origin, referer, extraHeaders)
             if (retry.tokenExpired) {
                 Log.w(TAG, "callMtop($api) 刷新后仍过期，判定登录态失效")
                 return finish(false, retry.message, retry.json, retry.retCode)
@@ -254,7 +247,10 @@ object MtopClient {
         api: String,
         version: String,
         dataObj: JSONObject,
-        extraQuery: Map<String, String> = emptyMap()
+        extraQuery: Map<String, String> = emptyMap(),
+        origin: String = ORIGIN,
+        referer: String = "$ORIGIN/",
+        extraHeaders: Map<String, String> = emptyMap()
     ): RawResult {
         return try {
             val dataStr = dataObj.toString()
@@ -285,19 +281,19 @@ object MtopClient {
             val body = FormBody.Builder()
                 .add("data", dataStr)
                 .build()
-            val request = Request.Builder()
+            val reqB = Request.Builder()
                 .url(urlBuilder.toString())
                 .header("Cookie", cookie)
                 .header("User-Agent", UA)
-                .header("Origin", ORIGIN)
-                .header("Referer", "$ORIGIN/")
+                .header("Origin", origin)
+                .header("Referer", referer)
                 .header("Accept", "application/json")
                 .header("Connection", "keep-alive")
                 .header("Sec-Fetch-Site", "same-site")
                 .header("Sec-Fetch-Mode", "cors")
                 .header("Sec-Fetch-Dest", "empty")
-                .post(body)
-                .build()
+            extraHeaders.forEach { (k, v) -> reqB.header(k, v) }
+            val request = reqB.post(body).build()
 
             client.newCall(request).execute().use { resp ->
                 val raw = resp.body?.string().orEmpty()
@@ -531,13 +527,12 @@ object MtopClient {
         if (cookie.isBlank()) return false to emptyList()
         val userId = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
 
-        // 1) 个人版优先
+        // 1) 个人版查询：彻底移除硬编码 groupId（之前写死 58877261 导致非该分组宝贝全部查不到）
         val personalData = JSONObject().apply {
             put("needGroupInfo", false)
             put("pageNumber", page)
             put("pageSize", pageSize)
             put("groupName", "在售")
-            put("groupId", "58877261")
             put("defaultGroup", true)
             if (userId.isNotBlank()) put("userId", userId)
         }
@@ -552,8 +547,11 @@ object MtopClient {
         )
         if (personal.success) {
             val items = mapPersonalItems(personal.json)
-            Log.i(TAG, "queryOnSaleItems 个人版成功，获取 ${items.size} 件")
-            return true to items
+            if (items.isNotEmpty()) {
+                Log.i(TAG, "queryOnSaleItems 个人版成功，获取 ${items.size} 件")
+                return true to items
+            }
+            Log.i(TAG, "queryOnSaleItems 个人版未返回商品(0件)，尝试鱼小铺卖家平台")
         }
 
         // 风控错误绝不回退
@@ -562,8 +560,7 @@ object MtopClient {
             return false to emptyList()
         }
 
-        // 2) 鱼小铺回退
-        Log.i(TAG, "queryOnSaleItems 个人版非风控失败(${personal.retCode})，回退鱼小铺")
+        // 2) 鱼小铺卖家平台查询（携带 seller.goofish.com 与 idle_site_biz_code=COMMONPRO 专业版头）
         val shopData = JSONObject().apply {
             put("pageNo", page)
             put("pageSize", pageSize)
@@ -576,15 +573,47 @@ object MtopClient {
             api = "mtop.alibaba.idle.seller.pc.common.item.search",
             version = "1.0",
             dataObj = shopData,
-            extraQuery = mapOf("needLoginPC" to "true", "accountSite" to "xianyu"),
+            extraQuery = mapOf(
+                "needLoginPC" to "true",
+                "accountSite" to "xianyu",
+                "spm_cnt" to "a21107h.42826273.0.0"
+            ),
             onCookieRefreshed = onCookieRefreshed,
-            onResult = onResult
+            onResult = onResult,
+            origin = "https://seller.goofish.com",
+            referer = "https://seller.goofish.com/?site=COMMONPRO",
+            extraHeaders = mapOf(
+                "idle_site_biz_code" to "COMMONPRO",
+                "idle_user_group_member_id" to ""
+            )
         )
         if (shop.success) {
             val items = mapShopItems(shop.json)
-            return true to items
+            if (items.isNotEmpty()) {
+                Log.i(TAG, "queryOnSaleItems 鱼小铺成功，获取 ${items.size} 件")
+                return true to items
+            }
         }
-        return false to emptyList()
+
+        // 3) 兜底：尝试不带 groupName 的全量个人宝贝查询
+        val fallbackData = JSONObject().apply {
+            put("pageNumber", page)
+            put("pageSize", pageSize)
+            if (userId.isNotBlank()) put("userId", userId)
+        }
+        val fallback = callMtop(
+            cookie = cookie,
+            api = "mtop.idle.web.xyh.item.list",
+            version = "1.0",
+            dataObj = fallbackData,
+            onCookieRefreshed = onCookieRefreshed
+        )
+        if (fallback.success) {
+            val items = mapPersonalItems(fallback.json)
+            if (items.isNotEmpty()) return true to items
+        }
+
+        return true to emptyList()
     }
 
     private val RISK_MARKERS = arrayOf("RGV587_ERROR", "FAIL_SYS_USER_VALIDATE", "LIMIT", "captcha", "被挤爆")
@@ -592,18 +621,24 @@ object MtopClient {
 
     private fun mapPersonalItems(root: JSONObject?): List<OnSaleItem> {
         val data = root?.optJSONObject("data") ?: return emptyList()
-        val cards = data.optJSONArray("cardList") ?: return emptyList()
+        val cards = data.optJSONArray("cardList")
+            ?: data.optJSONArray("itemList")
+            ?: data.optJSONArray("items")
+            ?: data.optJSONArray("list")
+            ?: return emptyList()
         val out = ArrayList<OnSaleItem>(cards.length())
         for (i in 0 until cards.length()) {
-            val card = cards.optJSONObject(i)?.optJSONObject("cardData") ?: continue
-            val id = card.optString("id").ifBlank { card.optString("itemId") }
-            if (id.isBlank()) continue
-            val title = card.optString("title")
+            val raw = cards.optJSONObject(i) ?: continue
+            val card = raw.optJSONObject("cardData") ?: raw
+            val id = firstNonBlank(card, "id", "itemId", "item_id") ?: continue
+            val title = firstNonBlank(card, "title", "itemTitle", "name") ?: ""
             val price = card.optJSONObject("priceInfo")?.optString("price").orEmpty()
-                .ifBlank { card.optString("price") }
+                .ifBlank { firstNonBlank(card, "price", "soldPrice", "reservePrice") ?: "" }
             val picUrl = card.optJSONObject("picInfo")?.optString("url").orEmpty()
                 .ifBlank { card.optJSONObject("picInfo")?.optString("picUrl").orEmpty() }
-            val status = if (card.optInt("itemStatus") == 0) "在售" else "已下架"
+                .ifBlank { firstNonBlank(card, "picUrl", "imageUrl", "image", "itemImageUrl", "cover") ?: "" }
+            val status = firstNonBlank(card, "itemStatusDesc", "status")
+                ?: if (card.optInt("itemStatus") == 0) "在售" else "已下架"
             val detailUrl = "https://www.goofish.com/item?id=$id"
             out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "personal"))
         }
@@ -611,17 +646,22 @@ object MtopClient {
     }
 
     private fun mapShopItems(root: JSONObject?): List<OnSaleItem> {
-        val data = root?.optJSONObject("data")?.optJSONObject("data") ?: return emptyList()
-        val list = data.optJSONArray("itemSearchResponseList") ?: return emptyList()
+        val data = root?.optJSONObject("data")?.optJSONObject("data")
+            ?: root?.optJSONObject("data")
+            ?: return emptyList()
+        val list = data.optJSONArray("itemSearchResponseList")
+            ?: data.optJSONArray("itemList")
+            ?: data.optJSONArray("items")
+            ?: data.optJSONArray("list")
+            ?: return emptyList()
         val out = ArrayList<OnSaleItem>(list.length())
         for (i in 0 until list.length()) {
             val o = list.optJSONObject(i) ?: continue
-            val id = o.optString("itemId")
-            if (id.isBlank()) continue
-            val title = o.optString("title")
-            val price = o.optString("reservePrice")
-            val picUrl = o.optString("itemImageUrl")
-            val status = o.optString("itemStatusDesc").ifBlank { "在售" }
+            val id = firstNonBlank(o, "itemId", "id", "item_id") ?: continue
+            val title = firstNonBlank(o, "title", "itemTitle", "name") ?: ""
+            val price = firstNonBlank(o, "reservePrice", "price", "soldPrice") ?: ""
+            val picUrl = firstNonBlank(o, "itemImageUrl", "imageUrl", "picUrl", "cover") ?: ""
+            val status = firstNonBlank(o, "itemStatusDesc", "status").ifBlank { "在售" }
             val detailUrl = "https://www.goofish.com/item?id=$id"
             out.add(OnSaleItem(id, title, price, picUrl, status, detailUrl, "shop"))
         }
