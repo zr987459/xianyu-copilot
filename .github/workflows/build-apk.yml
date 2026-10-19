@@ -2,7 +2,9 @@ name: Build Xianyu Copilot APK
 
 on:
   push:
-    branches: [ "main", "feat/**" ]
+    branches: [ "main", "feat/**", "fix/**" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
