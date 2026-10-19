@@ -68,37 +68,45 @@ object AccountManager {
         val finalCookie = check.cookie.ifBlank { normalized }
 
         if (!check.valid) {
-            Log.w(TAG, "${source.label} 校验失败: ${check.message}")
+            val isNetErr = check.message.contains("connection", ignoreCase = true) ||
+                check.message.contains("timeout", ignoreCase = true) ||
+                check.message.contains("connect", ignoreCase = true)
+            Log.w(TAG, "${source.label} 校验未通过: ${check.message} (isNetErr=$isNetErr)")
             val db = CardDatabase.get(context)
             val existing = db.getAccountCookie(unb)
             if (existing.isNotEmpty()) {
-                // 该账号已有 cookie：绝不用校验失败的 cookie 覆盖它，也不改它的状态
+                // 该账号已有 cookie：绝不用有风险的 cookie 覆盖它
                 return SaveResult(
                     ok = false,
                     nick = parsed["tracknick"] ?: unb,
                     userId = unb,
                     cookie = finalCookie,
                     activated = false,
-                    message = "Cookie 校验未通过：${check.message}（已有账号保持不变）"
+                    message = if (isNetErr) "网络连接异常(${check.message})，请检查网络或关闭VPN代理"
+                              else "Cookie 校验未通过：${check.message}（已有账号保持不变）"
                 )
             }
-            // 新账号：只入库不激活，状态标为 EXPIRED
+            // 新账号：若是纯网络异常且库内无活跃账号，予以激活避免卡死；非网络异常则标为 EXPIRED
+            val hasActive = db.getActiveAccount() != null
+            val shouldActivate = isNetErr && !hasActive
+            val status = if (isNetErr) "ACTIVE" else "EXPIRED"
             db.addOrUpdateAccount(
                 userId = unb,
                 nick = parsed["tracknick"] ?: unb,
                 avatar = "",
                 cookie = finalCookie,
-                activate = false,
-                status = "EXPIRED"
+                activate = shouldActivate,
+                status = status
             )
-            db.recordAccountCheck(unb, success = false, detail = check.message)
+            db.recordAccountCheck(unb, success = isNetErr, detail = check.message)
             return SaveResult(
-                ok = false,
+                ok = isNetErr,
                 nick = parsed["tracknick"] ?: unb,
                 userId = unb,
                 cookie = finalCookie,
-                activated = false,
-                message = "Cookie 校验未通过：${check.message}（已保存但未激活）"
+                activated = shouldActivate,
+                message = if (isNetErr) "账号已保存（网络连接不顺畅，建议检查VPN/代理）"
+                          else "Cookie 校验未通过：${check.message}（已保存但未激活）"
             )
         }
 

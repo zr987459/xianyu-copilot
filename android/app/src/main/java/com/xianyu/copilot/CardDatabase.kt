@@ -305,7 +305,7 @@ class CardDatabase private constructor(context: Context) :
         val sql = """
             SELECT id,user_id,nick,avatar,cookie,is_active,status,updated_at
             FROM $T_ACCOUNTS
-            ORDER BY is_active DESC, updated_at DESC
+            WHERE is_active = 1
             LIMIT 1
         """.trimIndent()
         readableDatabase.rawQuery(sql, null).use { c ->

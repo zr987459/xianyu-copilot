@@ -508,7 +508,7 @@ class LocalServer(private val context: Context) {
             out.put("activated", false)
             out.put("message", result.message)
             // 400：校验未通过，但已保留记录，不激活
-            return jsonResponse(JSONObject().put("ok", false).put("success", false).put("data", out), 400)
+            return jsonResponse(JSONObject().put("ok", false).put("success", false).put("message", result.message).put("data", out), 400)
         }
 
         val out = JSONObject()

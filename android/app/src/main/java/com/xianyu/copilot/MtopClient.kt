@@ -3,6 +3,7 @@ package com.xianyu.copilot
 import android.util.Log
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,6 +25,8 @@ object MtopClient {
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            // 强制使用 HTTP/1.1，避免阿里 mtop 网关 / 手机 VPN 代理下 HTTP/2 握手 RST_STREAM 报错 connection closed
+            .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(25, TimeUnit.SECONDS)
@@ -264,6 +267,10 @@ object MtopClient {
                 .header("Origin", ORIGIN)
                 .header("Referer", "$ORIGIN/")
                 .header("Accept", "application/json")
+                .header("Connection", "keep-alive")
+                .header("Sec-Fetch-Site", "same-site")
+                .header("Sec-Fetch-Mode", "cors")
+                .header("Sec-Fetch-Dest", "empty")
                 .post(body)
                 .build()
 

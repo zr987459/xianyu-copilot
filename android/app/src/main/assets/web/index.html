@@ -61,6 +61,8 @@ main{padding:12px 14px 0}
 .ai .n{font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:5px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bg{font-size:9.5px;padding:1.5px 7px;border-radius:20px;font-weight:700;background:#e7f8ec;color:var(--ok);flex:none}
+.bg.warn{background:#fff1e8;color:var(--brand)}
+.bg.err{background:#feeceb;color:var(--err)}
 .ai .m{font-size:10.5px;color:var(--sub);margin-top:2px}
 .daemon{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border-radius:12px;
   background:linear-gradient(135deg,#22252e,#343846);color:#fff;margin-bottom:10px}
@@ -689,13 +691,16 @@ function loadAccounts(){
 
     // 当前账号
     var cur = null;
-    for(var i=0;i<list.length;i++){ if(list[i].isActive || list[i].id == activeId) cur = list[i]; }
+    for(var i=0;i<list.length;i++){ if(list[i].isActive || (activeId > 0 && list[i].id == activeId)) cur = list[i]; }
     if(cur){
+      var isExp = cur.status === 'EXPIRED';
+      var bgCls = isExp ? 'bg err' : 'bg';
+      var bgTxt = isExp ? '需重新登录' : '在线';
       $('#curAcc').innerHTML =
         '<div style="display:flex;align-items:center;gap:11px">' +
           '<div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>' +
           '<div class="ai"><div class="n">' + esc(cur.nick || '闲鱼用户') +
-          ' <span class="bg">' + esc(cur.status || '在线') + '</span></div>' +
+          ' <span class="' + bgCls + '">' + bgTxt + '</span></div>' +
           '<div class="m">UID: ' + esc(cur.userId || '-') + '</div></div>' +
         '</div>';
     } else {
@@ -888,19 +893,18 @@ function submitCookie(){
   api('/api/accounts/import_cookie', { method:'POST', body:{ cookie: ck } }).then(function(d){
     btn.disabled = false;
     btn.textContent = '验证并保存';
-    if(d.valid){
-      toast('登录成功：' + (d.nick || ''));
-      closeCookie();
-      loadAccounts(); loadStats();
-    } else {
-      toast(d.message || 'Cookie 可能已失效，已保存但需注意');
-      closeCookie();
-      loadAccounts();
-    }
+    toast('登录成功：' + (d.nick || ''));
+    closeCookie();
+    loadAccounts(); loadStats();
   }).catch(function(e){
     btn.disabled = false;
     btn.textContent = '验证并保存';
-    toast('导入失败: ' + e.message);
+    toast(e.message || '导入异常');
+    // 如果提示已保存，自动关闭弹窗并刷新账号列表
+    if(e.message && e.message.indexOf('已保存') !== -1){
+      closeCookie();
+    }
+    loadAccounts(); loadStats();
   });
 }
 
