@@ -235,6 +235,15 @@ class LocalServer(private val context: Context) {
         return try {
             when {
                 path == "/api/stats" -> apiStats()
+                path == "/api/accounts" || path == "/api/accounts/list" -> when (req.method) {
+                    "GET" -> apiGetAccounts()
+                    else -> methodNotAllowed()
+                }
+                path == "/api/accounts/switch" -> if (req.method == "POST") apiSwitchAccount(req.body) else methodNotAllowed()
+                path == "/api/accounts/delete" -> if (req.method == "POST" || req.method == "DELETE") apiDeleteAccount(req.body, req.query) else methodNotAllowed()
+                path == "/api/accounts/import_cookie" || path == "/api/auth/cookie/login" -> if (req.method == "POST") apiImportCookie(req.body) else methodNotAllowed()
+                path == "/api/auth/qrcode/create" -> if (req.method == "POST") apiCreateQrCode() else methodNotAllowed()
+                path == "/api/auth/qrcode/check" -> if (req.method == "GET") apiCheckQrCode(req.query) else methodNotAllowed()
                 path == "/api/chats" -> jsonOk(JSONObject().put("chats", JSONArray()))
                 path == "/api/chat/messages" -> jsonOk(JSONObject().put("messages", JSONArray()))
                 path == "/api/cards/stock" -> apiCardsStock(req.query)
@@ -289,8 +298,9 @@ class LocalServer(private val context: Context) {
     private fun apiStats(): Response {
         val db = CardDatabase.get(context)
         val stats = db.getStats()
-        val cookie = db.getSetting("cookie", "")
-        val nick = db.getSetting("cookie_nick", "")
+        val activeAcc = db.getActiveAccount()
+        val cookie = db.getActiveCookie()
+        val nick = activeAcc?.nick ?: db.getSetting("cookie_nick", "")
 
         val res = JSONObject().apply {
             put("total_msgs", 0)
@@ -307,8 +317,17 @@ class LocalServer(private val context: Context) {
             val cookieObj = JSONObject()
             cookieObj.put("hasCookie", cookie.isNotBlank())
             cookieObj.put("nick", nick)
+            cookieObj.put("userId", activeAcc?.userId ?: "")
             cookieObj.put("valid", cookie.isNotBlank())
             put("cookie", cookieObj)
+
+            val accObj = JSONObject()
+            accObj.put("hasAccount", activeAcc != null)
+            accObj.put("id", activeAcc?.id ?: 0L)
+            accObj.put("nick", nick)
+            accObj.put("userId", activeAcc?.userId ?: "")
+            accObj.put("status", activeAcc?.status ?: "NONE")
+            put("account", accObj)
 
             val daemon = JSONObject()
             daemon.put("running", DaemonService.isRunning)
@@ -316,6 +335,87 @@ class LocalServer(private val context: Context) {
             put("daemon", daemon)
         }
         return jsonOk(res)
+    }
+
+    private fun apiGetAccounts(): Response {
+        val db = CardDatabase.get(context)
+        val accounts = db.getAccounts()
+        val active = db.getActiveAccount()
+        val arr = JSONArray()
+        for (a in accounts) {
+            val o = JSONObject()
+            o.put("id", a.id)
+            o.put("userId", a.userId)
+            o.put("nick", a.nick)
+            o.put("avatar", a.avatar)
+            o.put("isActive", a.isActive)
+            o.put("status", a.status)
+            o.put("updatedAt", a.updatedAt)
+            arr.put(o)
+        }
+        val out = JSONObject()
+        out.put("accounts", arr)
+        out.put("activeId", active?.id ?: 0L)
+        out.put("count", arr.length())
+        return jsonOk(out)
+    }
+
+    private fun apiSwitchAccount(body: String): Response {
+        val json = try { JSONObject(body) } catch (_: Exception) { null }
+            ?: return jsonError(400, "invalid json")
+        val id = json.optLong("id", 0L)
+        if (id <= 0) return jsonError(400, "id required")
+        val db = CardDatabase.get(context)
+        val ok = db.switchAccount(id)
+        return if (ok) jsonOk() else jsonError(404, "account not found")
+    }
+
+    private fun apiDeleteAccount(body: String, query: Map<String, String>): Response {
+        val db = CardDatabase.get(context)
+        val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+        val id = query["id"]?.toLongOrNull() ?: json.optLong("id", 0L)
+        if (id > 0) {
+            val ok = db.deleteAccount(id)
+            return jsonOk(JSONObject().put("deleted", ok))
+        }
+        val uid = json.optString("uid", "").ifBlank { query["uid"].orEmpty() }
+        if (uid.isNotBlank()) {
+            val acc = db.getAccounts().firstOrNull { it.userId == uid }
+            if (acc != null) {
+                val ok = db.deleteAccount(acc.id)
+                return jsonOk(JSONObject().put("deleted", ok))
+            }
+        }
+        return jsonError(400, "id or uid required")
+    }
+
+    private fun apiCreateQrCode(): Response {
+        val (ok, qrData) = QrLoginService.generateQrCode()
+        if (!ok || qrData == null) {
+            return jsonError(500, "获取登录二维码失败，请检查网络重试")
+        }
+        val out = JSONObject().apply {
+            put("token", qrData.lgToken)
+            put("lgToken", qrData.lgToken)
+            put("qrcode_url", qrData.qrImgUrl)
+            put("qrImgUrl", qrData.qrImgUrl)
+            put("qrCodeText", qrData.qrCodeText)
+        }
+        return jsonOk(out)
+    }
+
+    private fun apiCheckQrCode(query: Map<String, String>): Response {
+        val lgToken = query["lgToken"]?.trim().orEmpty().ifBlank { query["token"]?.trim().orEmpty() }
+        if (lgToken.isEmpty()) return jsonError(400, "lgToken required")
+        val res = QrLoginService.checkQrStatus(context, lgToken)
+        val out = JSONObject().apply {
+            put("status", res.status.name.lowercase())
+            put("statusCode", res.status.name)
+            put("message", res.message)
+            put("nick", res.nick ?: "")
+            put("userId", res.userId ?: "")
+        }
+        return jsonOk(out)
     }
 
     private fun apiCardsStock(query: Map<String, String>): Response {

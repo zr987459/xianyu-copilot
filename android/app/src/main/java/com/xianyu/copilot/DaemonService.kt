@@ -136,7 +136,7 @@ class DaemonService : Service() {
         val enabled = db.getSetting("daemon_enabled", "true") == "true"
         if (!enabled) return@withLock
 
-        val cookie = db.getSetting("cookie", "")
+        val cookie = db.getActiveCookie()
         if (cookie.isBlank()) return@withLock
 
         val orders = try {
