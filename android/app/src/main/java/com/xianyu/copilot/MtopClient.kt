@@ -1,10 +1,9 @@
 package com.xianyu.copilot
 
 import android.util.Log
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -22,8 +21,6 @@ object MtopClient {
     private const val UA =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-
-    private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -255,7 +252,11 @@ object MtopClient {
                 urlBuilder.append('&').append(k).append('=').append(encode(v))
             }
 
-            val body = dataStr.toRequestBody(JSON_TYPE)
+            // 修复 HTTP 415：闲鱼 Mtop H5 网关仅支持 application/x-www-form-urlencoded，
+            // 必须通过表单提交 data 参数。原先使用 application/json 导致被网关直接 415 拒收。
+            val body = FormBody.Builder()
+                .add("data", dataStr)
+                .build()
             val request = Request.Builder()
                 .url(urlBuilder.toString())
                 .header("Cookie", cookie)
@@ -375,6 +376,11 @@ object MtopClient {
                 api = "mtop.taobao.idlemessage.pc.loginuser.get",
                 version = "1.0",
                 dataObj = JSONObject(),
+                extraQuery = mapOf(
+                    "spm_cnt" to "a21ybx.im.0.0",
+                    "spm_pre" to "a21ybx.item.want.1.12523da6waCtUp",
+                    "log_id" to "12523da6waCtUp"
+                ),
                 onCookieRefreshed = { refreshed = it },
                 allowStoredBase = false
             )
