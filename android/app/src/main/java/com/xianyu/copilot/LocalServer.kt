@@ -874,10 +874,9 @@ class LocalServer(private val context: Context) {
         // 注入访问令牌：仅对 App 自己的 WebView 页面生效（同源）。
         // 外部浏览器访问没有 app 注入令牌也无所谓，但 static 页本身不含敏感数据。
         if (assetPath.endsWith(".html")) {
-            val html = String(bytes, StandardCharsets.UTF_8).replace(
+            val html = String(bytes, StandardCharsets.UTF_8).replaceFirst(
                 "</head>",
-                "<script>window.__API_TOKEN__='$apiToken';</script></head>",
-                1
+                "<script>window.__API_TOKEN__='$apiToken';</script></head>"
             )
             return Response(200, mime, html.toByteArray(StandardCharsets.UTF_8))
         }
