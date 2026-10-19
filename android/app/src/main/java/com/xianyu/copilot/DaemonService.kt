@@ -22,6 +22,7 @@ class DaemonService : Service() {
         private const val CHANNEL_ID = "xianyu_copilot_daemon"
         private const val NOTIF_ID = 1001
         private const val DEFAULT_INTERVAL = 15_000L
+        private const val COOKIE_CHECK_INTERVAL_MS = 5 * 60 * 1000L
 
         @Volatile
         var isRunning = false
@@ -50,6 +51,10 @@ class DaemonService : Service() {
     private val scanMutex = Mutex()
     private var localServer: LocalServer? = null
 
+    /** Cookie 健康检查节流（每 5 分钟最多提醒一次）。 */
+    @Volatile private var lastCookieCheckAt: Long = 0L
+    @Volatile private var cookieAlerted: Boolean = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -70,6 +75,8 @@ class DaemonService : Service() {
         }
 
         ensureLocalServer()
+        // 扫码登录需要 ApplicationContext 才能落库
+        QrLoginService.init(applicationContext)
         startLoop()
         return START_STICKY
     }
@@ -114,6 +121,30 @@ class DaemonService : Service() {
         }
     }
 
+    /**
+     * Cookie 失效时主动提醒。
+     * 修复：旧版守护层 cookie 过期只是静默 return，用户完全不知道已停止发货。
+     */
+    private fun notifyIfCookieBroken(db: CardDatabase, cookie: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastCookieCheckAt < COOKIE_CHECK_INTERVAL_MS) return
+        lastCookieCheckAt = now
+
+        val (lastOk, _, detail) = db.getLastCheck()
+        if (lastOk) {
+            if (cookieAlerted) {
+                cookieAlerted = false
+                updateNotification("闲鱼管家正在守护中 · 自动发货就绪")
+            }
+            return
+        }
+        if (!cookieAlerted) {
+            cookieAlerted = true
+            updateNotification("⚠️ 账号可能已失效，请打开 App 重新登录")
+            Log.w(TAG, "active cookie looks invalid: $detail")
+        }
+    }
+
     private fun startLoop() {
         if (loopJob?.isActive == true) return
         loopJob = scope.launch {
@@ -139,8 +170,14 @@ class DaemonService : Service() {
         val cookie = db.getActiveCookie()
         if (cookie.isBlank()) return@withLock
 
+        // 守护层不允许静默失败：cookie 失效时主动告知用户
+        notifyIfCookieBroken(db, cookie)
+
         val orders = try {
-            MtopClient.querySoldOrders(cookie)
+            // 令牌过期时自动刷新 _m_h5_tk 并回写数据库，避免「跑几小时就失效」
+            MtopClient.querySoldOrders(cookie) { refreshed ->
+                AccountManager.persistRefreshedCookie(applicationContext, refreshed)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "querySoldOrders failed", e)
             return@withLock
@@ -170,7 +207,11 @@ class DaemonService : Service() {
                     }
                 }.trim()
 
-                val (ok, msg) = MtopClient.confirmDummyShipping(cookie, order.orderId, rule.tradeText)
+                val (ok, msg) = MtopClient.confirmDummyShipping(
+                    cookie, order.orderId, rule.tradeText
+                ) { refreshed ->
+                    AccountManager.persistRefreshedCookie(applicationContext, refreshed)
+                }
                 db.recordLog(order.orderId, rule.keyword, content, if (ok) "自动发货完成" else "发货反馈: $msg")
                 handled++
             }.onFailure {

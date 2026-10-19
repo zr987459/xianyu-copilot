@@ -231,7 +231,7 @@ class CardDatabase private constructor(context: Context) :
                 put("user_id", uid)
                 put("nick", nick.orEmpty())
                 put("avatar", avatar.orEmpty())
-                put("cookie", cookie)
+                put("cookie", SecureStore.encrypt(cookie))
                 put("status", "ACTIVE")
                 put("updated_at", ts)
                 if (activate) put("is_active", 1)
@@ -269,7 +269,7 @@ class CardDatabase private constructor(context: Context) :
                         userId = c.getString(1).orEmpty(),
                         nick = c.getString(2).orEmpty(),
                         avatar = c.getString(3).orEmpty(),
-                        cookie = c.getString(4).orEmpty(),
+                        cookie = SecureStore.decrypt(c.getString(4)).orEmpty(),
                         isActive = c.getInt(5) == 1,
                         status = c.getString(6).orEmpty(),
                         updatedAt = c.getLong(7)
@@ -295,7 +295,7 @@ class CardDatabase private constructor(context: Context) :
                 userId = c.getString(1).orEmpty(),
                 nick = c.getString(2).orEmpty(),
                 avatar = c.getString(3).orEmpty(),
-                cookie = c.getString(4).orEmpty(),
+                cookie = SecureStore.decrypt(c.getString(4)).orEmpty(),
                 isActive = c.getInt(5) == 1,
                 status = c.getString(6).orEmpty(),
                 updatedAt = c.getLong(7)
@@ -356,6 +356,61 @@ class CardDatabase private constructor(context: Context) :
         }
     }
 
+    /**
+     * 回写令牌自愈后的最新 Cookie（按 userId 定位账号）。
+     * 同时同步 app_settings['cookie']，避免两处不一致。
+     */
+    fun updateAccountCookie(userId: String, cookie: String): Boolean = synchronized(writeLock) {
+        val uid = userId.trim()
+        if (uid.isEmpty() || cookie.isBlank()) return false
+        val ts = now()
+        val row = readableDatabase.rawQuery(
+            "SELECT id,is_active FROM $T_ACCOUNTS WHERE user_id=? LIMIT 1",
+            arrayOf(uid)
+        ).use { c ->
+            if (c.moveToFirst()) c.getLong(0) to (c.getInt(1) == 1) else null
+        } ?: return false
+
+        val cv = ContentValues().apply {
+            put("cookie", SecureStore.encrypt(cookie))
+            put("updated_at", ts)
+        }
+        val changed = writableDatabase.update(
+            T_ACCOUNTS, cv, "id=?", arrayOf(row.first.toString())
+        ) > 0
+        if (changed && row.second) {
+            saveSetting("cookie", cookie)
+        }
+        changed
+    }
+
+    /**
+     * 记录最近一次 mtop 校验结果（时间 + 错误码）。
+     * 用于把「账号是否有效」从「cookie 非空」改成真实可信的状态。
+     */
+    fun markAccountChecked(userId: String, success: Boolean, detail: String = "") = synchronized(writeLock) {
+        val uid = userId.trim()
+        if (uid.isEmpty()) return@synchronized
+        val ts = now()
+        val status = if (success) "ACTIVE" else "EXPIRED"
+        val cv = ContentValues().apply {
+            put("status", status)
+            put("updated_at", ts)
+        }
+        writableDatabase.update(T_ACCOUNTS, cv, "user_id=?", arrayOf(uid))
+        saveSetting("last_check_at", ts.toString())
+        saveSetting("last_check_ok", if (success) "1" else "0")
+        if (detail.isNotBlank()) saveSetting("last_check_detail", detail)
+    }
+
+    /** 最近一次校验信息：(是否成功, 时间戳, 说明)。 */
+    fun getLastCheck(): Triple<Boolean, Long, String> {
+        val ok = getSetting("last_check_ok", "") == "1"
+        val ts = getSetting("last_check_at", "0").toLongOrNull() ?: 0L
+        val detail = getSetting("last_check_detail", "")
+        return Triple(ok, ts, detail)
+    }
+
     /** 更新账号状态（如 ACTIVE / EXPIRED 等）。 */
     fun updateAccountStatus(id: Long, status: String) = synchronized(writeLock) {
         val cv = ContentValues().apply {
@@ -371,12 +426,7 @@ class CardDatabase private constructor(context: Context) :
      */
     fun getActiveCookie(): String {
         getActiveAccount()?.cookie?.takeIf { it.isNotBlank() }?.let { return it }
-        readableDatabase.rawQuery(
-            "SELECT value FROM $T_SETTINGS WHERE key=? LIMIT 1",
-            arrayOf(SETTING_COOKIE)
-        ).use { c ->
-            return if (c.moveToFirst()) c.getString(0).orEmpty() else ""
-        }
+        return getSetting(SETTING_COOKIE, "")
     }
 
     // ---------------------------------------------------------------------
@@ -754,7 +804,10 @@ class CardDatabase private constructor(context: Context) :
 
     fun getSetting(key: String, default: String): String {
         readableDatabase.rawQuery("SELECT value FROM $T_SETTINGS WHERE key=? LIMIT 1", arrayOf(key)).use { c ->
-            return if (c.moveToFirst()) c.getString(0).orEmpty() else default
+            if (!c.moveToFirst()) return default
+            val raw = c.getString(0).orEmpty()
+            // cookie 属于凭据，落库前已加密，读取时必须解密
+            return if (key == SETTING_COOKIE) SecureStore.decrypt(raw) else raw
         }
     }
 
@@ -764,7 +817,8 @@ class CardDatabase private constructor(context: Context) :
             db.safeTransaction { tx ->
                 val cv = ContentValues().apply {
                     put("key", key)
-                    put("value", value.orEmpty())
+                    // cookie 属于凭据，落库前加密
+                    put("value", if (key == SETTING_COOKIE) SecureStore.encrypt(value) else value.orEmpty())
                 }
                 tx.insertWithOnConflict(T_SETTINGS, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
             }
