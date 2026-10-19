@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
 /**
- * 卡密与发货规则 SQLite 管理模块。
+ * 卡密、发货规则与多账号管理 SQLite 模块。
  * 全局单例，所有写操作串行化于 [writeLock]，出库使用事务保证原子性。
  */
 class CardDatabase private constructor(context: Context) :
@@ -14,12 +14,15 @@ class CardDatabase private constructor(context: Context) :
 
     companion object {
         private const val DB_NAME = "xianyu_copilot.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
 
         private const val T_CARDS = "card_keys"
         private const val T_RULES = "delivery_rules"
         private const val T_LOGS = "delivery_logs"
         private const val T_SETTINGS = "app_settings"
+        private const val T_ACCOUNTS = "accounts"
+
+        private const val SETTING_COOKIE = "cookie"
 
         @Volatile
         private var instance: CardDatabase? = null
@@ -30,7 +33,6 @@ class CardDatabase private constructor(context: Context) :
             }
     }
 
-    /** 所有写事务统一锁，保证并发安全（SQLite 本身不支持多写并发）。 */
     private val writeLock = Any()
 
     init {
@@ -58,7 +60,7 @@ class CardDatabase private constructor(context: Context) :
             )
             """.trimIndent()
         )
-        db.execSQL("CREATE INDEX idx_cards_lookup ON $T_CARDS(keyword, sku, is_used)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_cards_lookup ON $T_CARDS(keyword, sku, is_used)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_card_avail ON $T_CARDS(keyword, sku, id) WHERE is_used = 0")
         db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS uk_card_order ON $T_CARDS(order_id) WHERE order_id IS NOT NULL")
 
@@ -75,7 +77,7 @@ class CardDatabase private constructor(context: Context) :
             )
             """.trimIndent()
         )
-        db.execSQL("CREATE INDEX idx_rules_keyword ON $T_RULES(keyword)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_rules_keyword ON $T_RULES(keyword)")
 
         db.execSQL(
             """
@@ -89,7 +91,7 @@ class CardDatabase private constructor(context: Context) :
             )
             """.trimIndent()
         )
-        db.execSQL("CREATE INDEX idx_logs_time ON $T_LOGS(created_at DESC)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_logs_time ON $T_LOGS(created_at DESC)")
 
         db.execSQL(
             """
@@ -99,10 +101,34 @@ class CardDatabase private constructor(context: Context) :
             )
             """.trimIndent()
         )
+
+        createAccountsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // 首个版本，后续按版本增量迁移
+        if (oldVersion < 2) {
+            createAccountsTable(db)
+        }
+    }
+
+    private fun createAccountsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $T_ACCOUNTS (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT UNIQUE,
+                nick TEXT NOT NULL,
+                avatar TEXT DEFAULT '',
+                cookie TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_accounts_active ON $T_ACCOUNTS(is_active) WHERE is_active = 1"
+        )
     }
 
     // ---------------------------------------------------------------------
@@ -145,6 +171,17 @@ class CardDatabase private constructor(context: Context) :
         val totalRules: Long
     )
 
+    data class AccountItem(
+        val id: Long,
+        val userId: String,
+        val nick: String,
+        val avatar: String,
+        val cookie: String,
+        val isActive: Boolean,
+        val status: String,
+        val updatedAt: Long
+    )
+
     private fun now(): Long = System.currentTimeMillis()
 
     private fun String?.orEmpty(): String = this ?: ""
@@ -161,79 +198,81 @@ class CardDatabase private constructor(context: Context) :
     }
 
     // ---------------------------------------------------------------------
-    // 卡密
+    // 多账号管理
     // ---------------------------------------------------------------------
 
     /**
-     * 批量导入卡密，同 (keyword, sku, content) 内容防重复。
-     * @return Pair(新增数, 重复数)
+     * 新增或更新账号（按 user_id 唯一键 upsert）。
+     * activate=true 时，同一事务内先将所有账号 is_active 归零，再置本账号为 1。
      */
-    fun addCards(keyword: String, sku: String, list: List<String>): Pair<Int, Int> {
-        val k = keyword.trim()
-        if (k.isEmpty() || list.isEmpty()) return 0 to 0
-        val s = sku.trim()
-        val seen = HashSet<String>()
-        var added = 0
-        var duplicated = 0
+    fun addOrUpdateAccount(
+        userId: String,
+        nick: String,
+        avatar: String,
+        cookie: String,
+        activate: Boolean
+    ): Long = synchronized(writeLock) {
+        val uid = userId.trim()
+        if (uid.isEmpty() || cookie.isBlank()) return -1
         val ts = now()
+        val db = writableDatabase
 
-        synchronized(writeLock) {
-            val db = writableDatabase
-            db.safeTransaction { tx ->
-                val cv = ContentValues()
-                for (raw in list) {
-                    val content = raw.trim()
-                    if (content.isEmpty()) continue
-                    if (!seen.add(content)) { duplicated++; continue }
-
-                    // 先查询是否已存在，避免异常开销
-                    val exists = tx.rawQuery(
-                        "SELECT 1 FROM $T_CARDS WHERE keyword=? AND sku=? AND card_content=? LIMIT 1",
-                        arrayOf(k, s, content)
-                    ).use { it.moveToFirst() }
-                    if (exists) { duplicated++; continue }
-
-                    cv.clear()
-                    cv.put("keyword", k)
-                    cv.put("sku", s)
-                    cv.put("card_content", content)
-                    cv.put("is_used", 0)
-                    cv.put("created_at", ts)
-                    val id = tx.insert(T_CARDS, null, cv)
-                    if (id > 0) added++ else duplicated++
-                }
+        db.safeTransaction { tx ->
+            if (activate) {
+                tx.execSQL("UPDATE $T_ACCOUNTS SET is_active = 0 WHERE is_active = 1")
             }
+
+            val existingId = tx.rawQuery(
+                "SELECT id FROM $T_ACCOUNTS WHERE user_id=? LIMIT 1",
+                arrayOf(uid)
+            ).use { if (it.moveToFirst()) it.getLong(0) else -1L }
+
+            val cv = ContentValues().apply {
+                put("user_id", uid)
+                put("nick", nick.orEmpty())
+                put("avatar", avatar.orEmpty())
+                put("cookie", cookie)
+                put("status", "ACTIVE")
+                put("updated_at", ts)
+                if (activate) put("is_active", 1)
+            }
+
+            val targetId: Long
+            if (existingId > 0) {
+                tx.update(T_ACCOUNTS, cv, "id=?", arrayOf(existingId.toString()))
+                targetId = existingId
+            } else {
+                cv.put("is_active", if (activate) 1 else 0)
+                targetId = tx.insert(T_ACCOUNTS, null, cv)
+            }
+
+            if (activate) {
+                saveSetting("cookie", cookie)
+                saveSetting("cookie_nick", nick)
+            }
+            targetId
         }
-        return added to duplicated
     }
 
-    /**
-     * 获取卡密列表。
-     * @param status 0=未使用, 1=已使用, 其它=全部
-     */
-    fun getCards(keyword: String, status: Int): List<CardItem> {
-        val args = ArrayList<String>()
-        val sb = StringBuilder("SELECT id,keyword,sku,card_content,is_used,order_id,used_at,created_at FROM $T_CARDS WHERE 1=1")
-        if (keyword.isNotBlank()) { sb.append(" AND keyword=?"); args.add(keyword.trim()) }
-        when (status) {
-            0, 1 -> { sb.append(" AND is_used=?"); args.add(status.toString()) }
-            else -> Unit
-        }
-        sb.append(" ORDER BY id DESC")
-
-        val out = ArrayList<CardItem>()
-        readableDatabase.rawQuery(sb.toString(), args.toTypedArray()).use { c ->
+    /** 全部账号，激活优先、更新时间倒序。 */
+    fun getAccounts(): List<AccountItem> {
+        val out = ArrayList<AccountItem>()
+        readableDatabase.rawQuery(
+            "SELECT id,user_id,nick,avatar,cookie,is_active,status,updated_at " +
+                "FROM $T_ACCOUNTS ORDER BY is_active DESC, updated_at DESC",
+            null
+        ).use { c ->
             while (c.moveToNext()) {
                 out.add(
-                    CardItem(
+                    AccountItem(
                         id = c.getLong(0),
-                        keyword = c.getString(1).orEmpty(),
-                        sku = c.getString(2).orEmpty(),
-                        cardContent = c.getString(3).orEmpty(),
-                        isUsed = c.getInt(4) == 1,
-                        orderId = if (c.isNull(5)) null else c.getString(5),
-                        usedAt = if (c.isNull(6)) null else c.getLong(6),
-                        createdAt = c.getLong(7)
+                        userId = c.getString(1).orEmpty(),
+                        nick = c.getString(2).orEmpty(),
+                        avatar = c.getString(3).orEmpty(),
+                        cookie = c.getString(4).orEmpty(),
+                        isActive = c.getInt(5) == 1,
+                        status = c.getString(6).orEmpty(),
+                        updatedAt = c.getLong(7)
                     )
                 )
             }
@@ -241,14 +280,103 @@ class CardDatabase private constructor(context: Context) :
         return out
     }
 
-    /** 删除单条卡密（仅允许删除未使用的，防止误删已出库记录）。 */
-    fun deleteCard(id: Long): Boolean = synchronized(writeLock) {
-        writableDatabase.delete(T_CARDS, "id=? AND is_used=0", arrayOf(id.toString())) > 0
+    /** 当前激活账号；无激活时返回排序第一条；表空返回 null。 */
+    fun getActiveAccount(): AccountItem? {
+        val sql = """
+            SELECT id,user_id,nick,avatar,cookie,is_active,status,updated_at
+            FROM $T_ACCOUNTS
+            ORDER BY is_active DESC, updated_at DESC
+            LIMIT 1
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, null).use { c ->
+            if (!c.moveToFirst()) return null
+            return AccountItem(
+                id = c.getLong(0),
+                userId = c.getString(1).orEmpty(),
+                nick = c.getString(2).orEmpty(),
+                avatar = c.getString(3).orEmpty(),
+                cookie = c.getString(4).orEmpty(),
+                isActive = c.getInt(5) == 1,
+                status = c.getString(6).orEmpty(),
+                updatedAt = c.getLong(7)
+            )
+        }
     }
 
-    /** 清空所有未使用的卡密，返回删除条数。 */
-    fun clearCards(): Int = synchronized(writeLock) {
-        writableDatabase.delete(T_CARDS, "is_used=0", null)
+    /** 切换激活账号；目标不存在返回 false。 */
+    fun switchAccount(id: Long): Boolean = synchronized(writeLock) {
+        val db = writableDatabase
+        db.safeTransaction { tx ->
+            val account = tx.rawQuery(
+                "SELECT cookie, nick FROM $T_ACCOUNTS WHERE id=? LIMIT 1",
+                arrayOf(id.toString())
+            ).use {
+                if (it.moveToFirst()) Pair(it.getString(0), it.getString(1)) else null
+            } ?: return@safeTransaction false
+
+            tx.execSQL("UPDATE $T_ACCOUNTS SET is_active = 0 WHERE is_active = 1")
+            tx.execSQL("UPDATE $T_ACCOUNTS SET is_active = 1, updated_at = ? WHERE id = ?",
+                arrayOf(now(), id.toString()))
+
+            saveSetting("cookie", account.first)
+            saveSetting("cookie_nick", account.second)
+            true
+        }
+    }
+
+    /** 删除账号；若删除激活账号，剩余账号中排序第一条自动激活。 */
+    fun deleteAccount(id: Long): Boolean = synchronized(writeLock) {
+        val db = writableDatabase
+        db.safeTransaction { tx ->
+            val wasActive = tx.rawQuery(
+                "SELECT is_active FROM $T_ACCOUNTS WHERE id=? LIMIT 1",
+                arrayOf(id.toString())
+            ).use { if (it.moveToFirst()) it.getInt(0) == 1 else return@safeTransaction false }
+
+            val rows = tx.delete(T_ACCOUNTS, "id=?", arrayOf(id.toString()))
+            if (rows <= 0) return@safeTransaction false
+
+            if (wasActive) {
+                val next = tx.rawQuery(
+                    "SELECT id, cookie, nick FROM $T_ACCOUNTS ORDER BY updated_at DESC, id DESC LIMIT 1",
+                    null
+                ).use {
+                    if (it.moveToFirst()) Triple(it.getLong(0), it.getString(1), it.getString(2)) else null
+                }
+                if (next != null) {
+                    tx.execSQL("UPDATE $T_ACCOUNTS SET is_active = 1 WHERE id = ?", arrayOf(next.first.toString()))
+                    saveSetting("cookie", next.second)
+                    saveSetting("cookie_nick", next.third)
+                } else {
+                    saveSetting("cookie", "")
+                    saveSetting("cookie_nick", "")
+                }
+            }
+            true
+        }
+    }
+
+    /** 更新账号状态（如 ACTIVE / EXPIRED 等）。 */
+    fun updateAccountStatus(id: Long, status: String) = synchronized(writeLock) {
+        val cv = ContentValues().apply {
+            put("status", status.orEmpty())
+            put("updated_at", now())
+        }
+        writableDatabase.update(T_ACCOUNTS, cv, "id=?", arrayOf(id.toString()))
+    }
+
+    /**
+     * 快捷取当前 cookie：
+     * 1) 激活账号 cookie；2) 兜底 app_settings['cookie']；3) 空串。
+     */
+    fun getActiveCookie(): String {
+        getActiveAccount()?.cookie?.takeIf { it.isNotBlank() }?.let { return it }
+        readableDatabase.rawQuery(
+            "SELECT value FROM $T_SETTINGS WHERE key=? LIMIT 1",
+            arrayOf(SETTING_COOKIE)
+        ).use { c ->
+            return if (c.moveToFirst()) c.getString(0).orEmpty() else ""
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -279,12 +407,6 @@ class CardDatabase private constructor(context: Context) :
     private fun SQLiteDatabase.queryString(sql: String, vararg args: String): String? =
         rawQuery(sql, args).use { c -> if (c.moveToFirst()) c.getString(0) else null }
 
-    /**
-     * 原子出库单张卡密（经 Hark 审查）：
-     * 1. 幂等：若同一 orderId 重复触发，直接返回已绑定的卡密，绝不重复发卡；
-     * 2. 原子抢占：beginTransactionNonExclusive (BEGIN IMMEDIATE) + 单语句 CAS 抢占。
-     * @return 卡密字符串，库存不足返回 null
-     */
     fun claimCardAtomic(keyword: String, sku: String, orderId: String): String? {
         val k = keyword.trim()
         val s = sku.trim()
@@ -294,13 +416,11 @@ class CardDatabase private constructor(context: Context) :
         val db = writableDatabase
         db.beginTransactionNonExclusive()
         try {
-            // 1. 幂等检查：该订单已出库过卡密则直接返回
             db.queryString(SQL_FIND_BY_ORDER, o)?.let {
                 db.setTransactionSuccessful()
                 return it
             }
 
-            // 2. 原子出库
             val sql = if (s.isNotEmpty()) SQL_CLAIM else SQL_CLAIM_NO_SKU
             val rows = db.compileStatement(sql).use { st ->
                 st.bindString(1, o)
@@ -320,11 +440,86 @@ class CardDatabase private constructor(context: Context) :
         }
     }
 
+    fun addCards(keyword: String, sku: String, list: List<String>): Pair<Int, Int> {
+        val k = keyword.trim()
+        if (k.isEmpty() || list.isEmpty()) return 0 to 0
+        val s = sku.trim()
+        val seen = HashSet<String>()
+        var added = 0
+        var duplicated = 0
+        val ts = now()
+
+        synchronized(writeLock) {
+            val db = writableDatabase
+            db.safeTransaction { tx ->
+                val cv = ContentValues()
+                for (raw in list) {
+                    val content = raw.trim()
+                    if (content.isEmpty()) continue
+                    if (!seen.add(content)) { duplicated++; continue }
+
+                    val exists = tx.rawQuery(
+                        "SELECT 1 FROM $T_CARDS WHERE keyword=? AND sku=? AND card_content=? LIMIT 1",
+                        arrayOf(k, s, content)
+                    ).use { it.moveToFirst() }
+                    if (exists) { duplicated++; continue }
+
+                    cv.clear()
+                    cv.put("keyword", k)
+                    cv.put("sku", s)
+                    cv.put("card_content", content)
+                    cv.put("is_used", 0)
+                    cv.put("created_at", ts)
+                    val id = tx.insert(T_CARDS, null, cv)
+                    if (id > 0) added++ else duplicated++
+                }
+            }
+        }
+        return added to duplicated
+    }
+
+    fun getCards(keyword: String, status: Int): List<CardItem> {
+        val args = ArrayList<String>()
+        val sb = StringBuilder("SELECT id,keyword,sku,card_content,is_used,order_id,used_at,created_at FROM $T_CARDS WHERE 1=1")
+        if (keyword.isNotBlank()) { sb.append(" AND keyword=?"); args.add(keyword.trim()) }
+        when (status) {
+            0, 1 -> { sb.append(" AND is_used=?"); args.add(status.toString()) }
+            else -> Unit
+        }
+        sb.append(" ORDER BY id DESC")
+
+        val out = ArrayList<CardItem>()
+        readableDatabase.rawQuery(sb.toString(), args.toTypedArray()).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    CardItem(
+                        id = c.getLong(0),
+                        keyword = c.getString(1).orEmpty(),
+                        sku = c.getString(2).orEmpty(),
+                        cardContent = c.getString(3).orEmpty(),
+                        isUsed = c.getInt(4) == 1,
+                        orderId = if (c.isNull(5)) null else c.getString(5),
+                        usedAt = if (c.isNull(6)) null else c.getLong(6),
+                        createdAt = c.getLong(7)
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    fun deleteCard(id: Long): Boolean = synchronized(writeLock) {
+        writableDatabase.delete(T_CARDS, "id=? AND is_used=0", arrayOf(id.toString())) > 0
+    }
+
+    fun clearCards(): Int = synchronized(writeLock) {
+        writableDatabase.delete(T_CARDS, "is_used=0", null)
+    }
+
     // ---------------------------------------------------------------------
     // 发货规则
     // ---------------------------------------------------------------------
 
-    /** 新增或更新规则；id<=0 时新增。返回规则 id，失败 -1。 */
     fun saveRule(
         id: Long,
         keyword: String,
@@ -379,10 +574,6 @@ class CardDatabase private constructor(context: Context) :
         writableDatabase.delete(T_RULES, "id=?", arrayOf(id.toString())) > 0
     }
 
-    /**
-     * 根据商品标题和 sku 匹配第一条规则：
-     * 优先匹配 sku 精确且 keyword 出现在标题；其次 sku 为空（通用）且 keyword 出现在标题。
-     */
     fun matchRule(title: String, sku: String): DeliveryRule? {
         val t = title.orEmpty()
         val s = sku.trim()
