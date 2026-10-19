@@ -389,6 +389,35 @@ class LocalServer(private val context: Context) {
         return jsonError(400, "id or uid required")
     }
 
+    private fun apiImportCookie(body: String): Response {
+        val json = try { JSONObject(body) } catch (_: Exception) { null }
+            ?: return jsonError(400, "invalid json")
+        val cookie = json.optString("cookie", "").trim()
+        if (cookie.isEmpty()) return jsonError(400, "cookie required")
+
+        val (ok, testNick) = MtopClient.testCookie(cookie)
+        val map = MtopSigner.parseCookies(cookie)
+        val unb = map["unb"] ?: map["tracknick"] ?: ("uid_" + System.currentTimeMillis().toString().takeLast(8))
+        val nick = if (ok && testNick.isNotBlank()) testNick else (map["tracknick"] ?: unb)
+
+        val db = CardDatabase.get(context)
+        val id = db.addOrUpdateAccount(
+            userId = unb,
+            nick = nick,
+            avatar = "",
+            cookie = cookie,
+            activate = true
+        )
+
+        val out = JSONObject()
+        out.put("id", id)
+        out.put("valid", ok)
+        out.put("nick", nick)
+        out.put("userId", unb)
+        out.put("message", if (ok) "登录成功" else "已添加，但Cookie可能已过期")
+        return jsonOk(out)
+    }
+
     private fun apiCreateQrCode(): Response {
         val (ok, qrData) = QrLoginService.generateQrCode()
         if (!ok || qrData == null) {
