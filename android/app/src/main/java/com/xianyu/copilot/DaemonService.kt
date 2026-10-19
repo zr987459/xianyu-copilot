@@ -151,14 +151,23 @@ class DaemonService : Service() {
         var handled = 0
         for (order in orders) {
             runCatching {
+                // 幂等：已经发过货的订单直接跳过，绝不重复发货
+                if (db.hasOrderDelivered(order.orderId)) return@runCatching
+
                 val rule = db.matchRule(order.title, order.sku) ?: return@runCatching
-                val card = if (rule.usePool) {
-                    db.claimCardAtomic(rule.keyword, rule.sku, order.orderId)
-                } else null
+                val cards = if (rule.usePool) {
+                    db.claimCardsAtomic(rule.keyword, rule.sku, order.orderId, order.quantity)
+                } else emptyList()
 
                 val content = buildString {
-                    if (!card.isNullOrBlank()) append("🎫 卡密: $card\n")
-                    if (rule.fixedContent.isNotBlank()) append(rule.fixedContent)
+                    if (cards.isNotEmpty()) {
+                        append("🎫 自动发货卡密 [${cards.size}件]:\n")
+                        cards.forEachIndexed { i, c -> append("${i + 1}. $c\n") }
+                    }
+                    if (rule.fixedContent.isNotBlank()) {
+                        if (cards.isNotEmpty()) append("\n")
+                        append(rule.fixedContent)
+                    }
                 }.trim()
 
                 val (ok, msg) = MtopClient.confirmDummyShipping(cookie, order.orderId, rule.tradeText)

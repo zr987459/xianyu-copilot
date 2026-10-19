@@ -40,7 +40,8 @@ object MtopClient {
         val title: String,
         val sku: String,
         val buyerNick: String,
-        val status: String
+        val status: String,
+        val quantity: Int = 1
     )
 
     // ---------------- 核心请求 ----------------
@@ -227,7 +228,9 @@ object MtopClient {
             val sku = firstNonBlank(o, "skuDesc", "sku", "propertyValue") ?: ""
             val buyer = firstNonBlank(o, "buyerNick", "buyerName", "buyer") ?: ""
             val status = firstNonBlank(o, "orderStatus", "status", "orderStatusName") ?: ""
-            out.add(SoldOrder(orderId, title, sku, buyer, status))
+            val qtyStr = firstNonBlank(o, "buyAmount", "buyQuantity", "itemNum", "quantity", "count")
+            val qty = qtyStr?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+            out.add(SoldOrder(orderId, title, sku, buyer, status, qty))
         }
         return out
     }

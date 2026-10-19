@@ -270,6 +270,8 @@ class LocalServer(private val context: Context) {
                     apiDeleteRule(mapOf("id" to idStr))
                 }
                 path == "/api/delivery/logs" || path == "/api/orders" || path == "/api/delivery/orders" -> apiGetOrders()
+                path == "/api/orders/waiting" -> apiGetWaitingOrders()
+                path == "/api/delivery/ship_now" -> if (req.method == "POST") apiShipNow(req.body) else methodNotAllowed()
                 path == "/api/publish/item" || path == "/api/publish" -> apiPublish(req.body)
                 path == "/api/publish/list" -> jsonOk(JSONObject().put("items", JSONArray()))
                 path == "/api/config" || path == "/api/cookie" -> when (req.method) {
@@ -583,6 +585,83 @@ class LocalServer(private val context: Context) {
         val deleted = db.deleteRule(id)
         val out = JSONObject().put("deleted", deleted)
         return jsonOk(out)
+    }
+
+    private fun apiGetWaitingOrders(): Response {
+        val db = CardDatabase.get(context)
+        val cookie = db.getActiveCookie()
+        if (cookie.isBlank()) return jsonOk(JSONObject().put("orders", JSONArray()).put("count", 0))
+        val list = MtopClient.querySoldOrders(cookie)
+        val arr = JSONArray()
+        for (o in list) {
+            val item = JSONObject().apply {
+                put("orderId", o.orderId)
+                put("title", o.title)
+                put("sku", o.sku)
+                put("buyer", o.buyerNick)
+                put("status", o.status)
+                put("quantity", o.quantity)
+            }
+            arr.put(item)
+        }
+        return jsonOk(JSONObject().put("orders", arr).put("count", arr.length()))
+    }
+
+    private fun apiShipNow(body: String): Response {
+        val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+        val orderId = json.optString("orderId", "").trim()
+        val title = json.optString("title", "").trim()
+        val sku = json.optString("sku", "").trim()
+        val qty = json.optInt("quantity", 1).coerceAtLeast(1)
+
+        val db = CardDatabase.get(context)
+        val cookie = db.getActiveCookie()
+        if (cookie.isBlank()) return jsonError(400, "未绑定闲鱼账号")
+        if (orderId.isBlank()) return jsonError(400, "订单号不能为空")
+
+        val rule = db.matchRule(title, sku)
+        val tradeText = rule?.tradeText?.ifBlank { "虚拟商品已自动交付" } ?: "虚拟商品已自动交付"
+
+        // 幂等：该订单是否已经发过货（卡密已出库 / 已有成功日志），避免重复发送
+        val alreadyShipped = db.hasOrderDelivered(orderId)
+        if (alreadyShipped) {
+            return jsonOk(
+                JSONObject().apply {
+                    put("ok", true)
+                    put("success", true)
+                    put("duplicated", true)
+                    put("message", "该订单此前已发货，未重复发送")
+                    put("cardsDelivered", 0)
+                }
+            )
+        }
+
+        val cardList = mutableListOf<String>()
+        if (rule?.usePool == true) {
+            cardList.addAll(db.claimCardsAtomic(rule.keyword, rule.sku, orderId, qty))
+        }
+
+        val content = buildString {
+            if (cardList.isNotEmpty()) {
+                append("🎫 卡密已发放 [${cardList.size}件]:\n")
+                cardList.forEachIndexed { i, c -> append("${i + 1}. $c\n") }
+            }
+            if (rule?.fixedContent?.isNotBlank() == true) {
+                if (cardList.isNotEmpty()) append("\n")
+                append(rule.fixedContent)
+            }
+        }.trim()
+
+        val (ok, msg) = MtopClient.confirmDummyShipping(cookie, orderId, tradeText)
+        db.recordLog(orderId, rule?.keyword ?: "手动发货", content, if (ok) "发货完成" else "发货反馈: $msg")
+
+        val out = JSONObject().apply {
+            put("ok", ok)
+            put("success", ok)
+            put("message", if (ok) "发货成功！" else msg)
+            put("cardsDelivered", cardList.size)
+        }
+        return jsonResponse(out)
     }
 
     private fun apiGetOrders(): Response {

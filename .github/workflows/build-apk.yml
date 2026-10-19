@@ -50,8 +50,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
-          name: "Xianyu Copilot v1.1.0 (多账号管理 · 扫码登录+网页登录+首屏修复)"
+          tag_name: v1.2.0
+          name: "Xianyu Copilot v1.2.0 (自动发货深度优化 · 一单多件 + 幂等防重发 + 全新界面)"
           target_commitish: ${{ github.sha }}
           prerelease: false
           files: dist/XianyuCopilot.apk
