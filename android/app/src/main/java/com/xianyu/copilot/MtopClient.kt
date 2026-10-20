@@ -115,7 +115,7 @@ object MtopClient {
         "未登录"
     )
 
-    private fun isSessionDead(ret: String): Boolean =
+    fun isSessionDead(ret: String): Boolean =
         SESSION_DEAD_MARKERS.any { ret.contains(it, ignoreCase = true) }
 
     /**
@@ -444,8 +444,9 @@ object MtopClient {
     }
 
     /**
-     * 查询卖家已卖出订单，过滤出待发货等状态。
-     * 主接口失败时回退备用接口。
+     * 查询卖家已卖出待发货订单。
+     * 官方标准卖家后台接口（mtop.taobao.idle.trade.merchant.sold.get）优先，
+     * 失败回退 H5 接口，且绝不把候选轮询失败误报为登录失效。
      */
     fun querySoldOrders(
         cookie: String,
@@ -453,10 +454,41 @@ object MtopClient {
         onResult: ((Boolean, String) -> Unit)? = null
     ): List<SoldOrder> {
         if (cookie.isBlank()) return emptyList()
+
+        // 1) 卖家平台已售订单标准接口（seller.goofish.com 官方接口）
+        val sellerData = JSONObject().apply {
+            put("pageNumber", 1)
+            put("rowsPerPage", 20)
+            put("orderIds", "")
+            put("queryCode", "NOT_SHIP")
+            put("orderSearchParam", "{}")
+        }
+        val rSeller = callMtop(
+            cookie = cookie,
+            api = "mtop.taobao.idle.trade.merchant.sold.get",
+            version = "1.0",
+            dataObj = sellerData,
+            extraQuery = mapOf(
+                "spm_cnt" to "a21107h.42826273.0.0",
+                "valueType" to "string"
+            ),
+            origin = "https://seller.goofish.com",
+            referer = "https://seller.goofish.com/",
+            extraHeaders = mapOf("idle_site_biz_code" to "COMMONPRO"),
+            onCookieRefreshed = onCookieRefreshed
+        )
+        if (rSeller.success) {
+            val list = parseOrders(rSeller.json)
+            onResult?.invoke(true, "成功")
+            return list
+        }
+
+        // 2) 备用：移动端 H5 候选接口
         val apis = listOf(
             "mtop.taobao.idle.sold.query" to "1.0",
             "mtop.idle.order.sold.list" to "1.0"
         )
+        var lastErr = rSeller.retCode.ifBlank { rSeller.message }
         for ((api, ver) in apis) {
             try {
                 val data = JSONObject().apply {
@@ -466,26 +498,34 @@ object MtopClient {
                 }
                 val r = callMtop(
                     cookie, api, ver, data,
-                    onCookieRefreshed = onCookieRefreshed,
-                    onResult = onResult
+                    onCookieRefreshed = onCookieRefreshed
                 )
-                if (!r.success) continue
-                val list = parseOrders(r.json)
-                if (list.isNotEmpty() || r.success) return list
+                if (r.success) {
+                    val list = parseOrders(r.json)
+                    onResult?.invoke(true, "成功")
+                    return list
+                } else {
+                    lastErr = r.retCode.ifBlank { r.message }
+                }
             } catch (e: Exception) {
+                lastErr = e.message ?: "异常"
                 Log.e(TAG, "querySoldOrders($api) error", e)
             }
         }
+
+        // 最终只有所有候选通道均失败时才回调，避免首通道回退误判
+        onResult?.invoke(false, lastErr)
         return emptyList()
     }
 
-    /** 兼容不同返回结构的订单解析。 */
+    /** 兼容不同返回结构的订单解析（包含 PC 卖家结构与 H5 结构）。 */
     private fun parseOrders(root: JSONObject?): List<SoldOrder> {
         if (root == null) return emptyList()
         val data = root.optJSONObject("data") ?: return emptyList()
 
         val arr: JSONArray? = data.optJSONArray("orderList")
             ?: data.optJSONArray("list")
+            ?: data.optJSONArray("itemSearchResponseList")
             ?: data.optJSONObject("data")?.optJSONArray("orderList")
             ?: data.optJSONObject("result")?.optJSONArray("list")
         if (arr == null) return emptyList()
@@ -493,21 +533,46 @@ object MtopClient {
         val out = ArrayList<SoldOrder>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val orderId = firstNonBlank(
-                o, "orderId", "bizOrderId", "orderStr", "id"
-            ) ?: continue
-            val title = firstNonBlank(
-                o, "itemTitle", "title", "auctionTitle"
-            ) ?: ""
+            val common = o.optJSONObject("commonData")
+            val buyerVo = o.optJSONObject("buyerInfoVO")
+            val priceVo = o.optJSONObject("priceVO")
+
+            val orderId = firstNonBlank(o, "orderId", "bizOrderId", "orderStr", "id")
+                ?: (if (common != null) firstNonBlank(common, "orderId", "id") else null)
+                ?: continue
+
+            val title = firstNonBlank(o, "itemTitle", "title", "auctionTitle")
+                ?: (if (common != null) firstNonBlank(common, "itemTitle", "title") else null)
+                ?: ""
+
             val sku = firstNonBlank(o, "skuDesc", "sku", "propertyValue") ?: ""
-            val buyer = firstNonBlank(o, "buyerNick", "buyerName", "buyer") ?: ""
-            val status = firstNonBlank(o, "orderStatus", "status", "orderStatusName") ?: ""
+
+            val buyer = firstNonBlank(o, "buyerNick", "buyerName", "buyer")
+                ?: (if (buyerVo != null) firstNonBlank(buyerVo, "userNick", "nick", "name", "buyerNick") else null)
+                ?: ""
+
+            val status = firstNonBlank(o, "orderStatus", "status", "orderStatusName")
+                ?: (if (common != null) firstNonBlank(common, "orderStatus", "status") else null)
+                ?: "待发货"
+
             val qtyStr = firstNonBlank(o, "buyAmount", "buyQuantity", "itemNum", "quantity", "count")
+                ?: (if (priceVo != null) firstNonBlank(priceVo, "buyNum", "count", "quantity") else null)
             val qty = qtyStr?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-            val price = firstNonBlank(o, "actualPayFee", "totalPrice", "orderPrice", "price", "amount") ?: ""
-            val city = firstNonBlank(o, "receiverCity", "buyerCity", "city", "provCity", "buyerLocation") ?: ""
+
+            val price = firstNonBlank(o, "actualPayFee", "totalPrice", "orderPrice", "price", "amount")
+                ?: (if (priceVo != null) firstNonBlank(priceVo, "totalPrice", "price") else null)
+                ?: ""
+
+            val city = firstNonBlank(o, "receiverCity", "buyerCity", "city", "provCity", "buyerLocation")
+                ?: (if (buyerVo != null) firstNonBlank(buyerVo, "city", "address", "receiverCity") else null)
+                ?: ""
+
             val msg = firstNonBlank(o, "buyerMessage", "buyerRemark", "memo", "note", "message") ?: ""
-            val cTime = firstNonBlank(o, "createTime", "orderCreateTime", "orderTime", "gmtCreate", "payTime") ?: ""
+
+            val cTime = firstNonBlank(o, "createTime", "orderCreateTime", "orderTime", "gmtCreate", "payTime")
+                ?: (if (common != null) firstNonBlank(common, "createTime", "orderTime") else null)
+                ?: ""
+
             out.add(SoldOrder(orderId, title, sku, buyer, status, qty, price, city, msg, cTime))
         }
         return out

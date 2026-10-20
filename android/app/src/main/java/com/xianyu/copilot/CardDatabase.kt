@@ -29,8 +29,26 @@ class CardDatabase private constructor(context: Context) :
 
         fun get(context: Context): CardDatabase =
             instance ?: synchronized(this) {
-                instance ?: CardDatabase(context).also { instance = it }
+                instance ?: CardDatabase(context).also {
+                    instance = it
+                    autoHealFalselyExpired(it.writableDatabase)
+                }
             }
+
+        /** 自愈历史因网络异常被误标为 EXPIRED 的账号。 */
+        private fun autoHealFalselyExpired(db: SQLiteDatabase) {
+            runCatching {
+                db.execSQL(
+                    """
+                    UPDATE accounts SET status = 'ACTIVE'
+                    WHERE status = 'EXPIRED'
+                      AND last_check_msg NOT LIKE '%SESSION%'
+                      AND last_check_msg NOT LIKE '%重新登录%'
+                      AND last_check_msg NOT LIKE '%未登录%'
+                    """.trimIndent()
+                )
+            }
+        }
     }
 
     private val writeLock = Any()
@@ -439,11 +457,18 @@ class CardDatabase private constructor(context: Context) :
     fun recordAccountCheck(userId: String, success: Boolean, detail: String = "") = synchronized(writeLock) {
         val uid = userId.trim()
         if (uid.isEmpty()) return@synchronized
+        val ts = now()
+        val isDead = MtopClient.isSessionDead(detail)
         val cv = ContentValues().apply {
-            put("status", if (success) "ACTIVE" else "EXPIRED")
-            put("last_check_at", now())
+            if (success) {
+                put("status", "ACTIVE")
+            } else if (isDead) {
+                put("status", "EXPIRED")
+            }
+            // 关键修复：绝不把网络超时、无订单等常规错误误标为 EXPIRED！
+            put("last_check_at", ts)
             put("last_check_msg", detail.orEmpty())
-            put("updated_at", now())
+            put("updated_at", ts)
         }
         writableDatabase.update(T_ACCOUNTS, cv, "user_id=?", arrayOf(uid))
     }

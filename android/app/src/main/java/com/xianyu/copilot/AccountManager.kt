@@ -86,10 +86,12 @@ object AccountManager {
                               else "Cookie 校验未通过：${check.message}（已有账号保持不变）"
                 )
             }
-            // 新账号：若是纯网络异常且库内无活跃账号，予以激活避免卡死；非网络异常则标为 EXPIRED
+            // 新账号：只有「确认登录态失效」才标 EXPIRED；网络异常等一律按 ACTIVE 存，
+            // 否则一次 VPN 抖动就会永久打上「需重新登录」的标签。
             val hasActive = db.getActiveAccount() != null
-            val shouldActivate = isNetErr && !hasActive
-            val status = if (isNetErr) "ACTIVE" else "EXPIRED"
+            val sessionDead = MtopClient.isSessionDead(check.message)
+            val shouldActivate = (isNetErr || !sessionDead) && !hasActive
+            val status = if (sessionDead && !isNetErr) "EXPIRED" else "ACTIVE"
             db.addOrUpdateAccount(
                 userId = unb,
                 nick = parsed["tracknick"] ?: unb,

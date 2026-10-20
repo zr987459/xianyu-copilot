@@ -143,6 +143,8 @@ class DaemonService : Service() {
         val (checkedAt, ok, detail) = db.getAccountCheck(unb)
         // 从未校验过（刚升级/刚添加）不误报
         if (checkedAt == 0L) return
+        // 只有确认登录态失效才报警：网络抖动、接口业务错误不打扰用户
+        if (!ok && !MtopClient.isSessionDead(detail)) return
 
         if (ok) {
             if (cookieAlerted) {
