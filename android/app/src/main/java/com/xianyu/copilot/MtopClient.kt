@@ -108,15 +108,23 @@ object MtopClient {
     private val SESSION_DEAD_MARKERS = arrayOf(
         "FAIL_SYS_SESSION_EXPIRED",
         "FAIL_SYS_SESSION_EXOIRED",
-        "FAIL_SYS_USER_VALIDATE",
         "FAIL_SYS_LOGIN",
         "SESSION_EXPIRED",
         "请重新登录",
         "未登录"
     )
 
-    private fun isSessionDead(ret: String): Boolean =
-        SESSION_DEAD_MARKERS.any { ret.contains(it, ignoreCase = true) }
+    /**
+     * 是否真的登录态失效。
+     *
+     * 注意：FAIL_SYS_USER_VALIDATE 属于风控/滑块，不是掉登录，绝不能判失效，
+     * 否则用户会看到「需重新登录」而实际只需稍后重试。
+     */
+    fun isSessionDead(ret: String): Boolean {
+        if (ret.isBlank()) return false
+        if (isRiskControl(ret)) return false
+        return SESSION_DEAD_MARKERS.any { ret.contains(it, ignoreCase = true) }
+    }
 
     /**
      * 从响应 Set-Cookie 中提取新令牌并合并回 Cookie 字符串。
@@ -211,8 +219,10 @@ object MtopClient {
             val merged = mergeSetCookie(baseCookie, first.setCookies)
             val newToken = MtopSigner.parseCookies(merged)["_m_h5_tk"]
             if (merged == baseCookie || newToken == oldToken) {
+                // 令牌已过期且拿不到新令牌 ⇒ 登录态实际已失效，映射成明确失效码，
+                // 否则上层只看 FAIL_SYS_TOKEN_EXOIRED 会误以为是可自愈的普通错误。
                 Log.w(TAG, "callMtop($api) 令牌未能刷新，判定登录态失效: ${first.retCode}")
-                return finish(false, first.message, first.json, first.retCode)
+                return finish(false, first.message, first.json, "FAIL_SYS_SESSION_EXPIRED")
             }
 
             Log.i(TAG, "callMtop($api) 令牌已刷新，重签重试一次")
@@ -221,7 +231,7 @@ object MtopClient {
             val retry = callMtopOnce(merged, api, version, dataObj, extraQuery, origin, referer, extraHeaders)
             if (retry.tokenExpired) {
                 Log.w(TAG, "callMtop($api) 刷新后仍过期，判定登录态失效")
-                return finish(false, retry.message, retry.json, retry.retCode)
+                return finish(false, retry.message, retry.json, "FAIL_SYS_SESSION_EXPIRED")
             }
             return finish(retry.success, retry.message, retry.json, retry.retCode)
         }
@@ -422,7 +432,8 @@ object MtopClient {
                 allowStoredBase = false
             )
             if (!r.success) {
-                return CookieCheck(false, cookie = refreshed, message = r.message)
+                // 用 retCode 优先，才能识别出「令牌刷新失败」被映射的会话失效码
+                return CookieCheck(false, cookie = refreshed, message = r.retCode.ifBlank { r.message })
             }
             val data = r.json?.optJSONObject("data")
             val nick = data?.let {
@@ -444,19 +455,77 @@ object MtopClient {
     }
 
     /**
-     * 查询卖家已卖出订单，过滤出待发货等状态。
-     * 主接口失败时回退备用接口。
+     * 查询卖家已卖出待发货订单。
+     * 官方标准卖家后台接口（mtop.taobao.idle.trade.merchant.sold.get）优先，
+     * 失败回退 H5 接口，且绝不把候选轮询失败误报为登录失效。
      */
+    /** 上次成功的订单通道，优先复用，避免每轮扫描都试 3 个接口触发风控。 */
+    @Volatile
+    private var lastSoldChannel: String = "seller"
+
     fun querySoldOrders(
         cookie: String,
         onCookieRefreshed: ((String) -> Unit)? = null,
         onResult: ((Boolean, String) -> Unit)? = null
     ): List<SoldOrder> {
         if (cookie.isBlank()) return emptyList()
-        val apis = listOf(
+
+        // 1) 卖家平台已售订单标准接口（seller.goofish.com 官方接口）
+        val sellerData = JSONObject().apply {
+            put("pageNumber", 1)
+            put("rowsPerPage", 20)
+            put("orderIds", "")
+            put("queryCode", "NOT_SHIP")
+            put("orderSearchParam", "{}")
+        }
+        val rSeller = callMtop(
+            cookie = cookie,
+            api = "mtop.taobao.idle.trade.merchant.sold.get",
+            version = "1.0",
+            dataObj = sellerData,
+            extraQuery = mapOf(
+                "spm_cnt" to "a21107h.42826273.0.0",
+                "valueType" to "string"
+            ),
+            origin = "https://seller.goofish.com",
+            referer = "https://seller.goofish.com/",
+            extraHeaders = mapOf("idle_site_biz_code" to "COMMONPRO"),
+            onCookieRefreshed = onCookieRefreshed
+        )
+        if (rSeller.success) {
+            val list = parseOrders(rSeller.json)
+            // 成功但结构不认识：打日志并继续回退，避免静默不发货
+            if (list.isEmpty() && !hasOrderArray(rSeller.json)) {
+                Log.w(TAG, "querySoldOrders 卖家接口成功但未识别出订单结构，回退备用通道")
+            } else {
+                lastSoldChannel = "seller"
+                onResult?.invoke(true, "成功")
+                return list
+            }
+        }
+
+        // 只有风控才短路。会话类错误必须继续走 H5 通道：
+        // 这个卖家接口尚未用真实账号验证，若它对普通卖家恒报会话错误，
+        // 直接短路会造成「界面显示在线，却一单都不发」这种更隐蔽的问题。
+        val sellerErr = rSeller.retCode.ifBlank { rSeller.message }
+        if (isRiskControl(sellerErr)) {
+            Log.w(TAG, "querySoldOrders 卖家接口触碰风控，短路返回: $sellerErr")
+            onResult?.invoke(false, sellerErr)
+            return emptyList()
+        }
+        if (isSessionDead(sellerErr)) {
+            Log.w(TAG, "querySoldOrders 卖家接口报会话失效，继续尝试 H5 通道")
+        }
+
+        // 2) 备用：移动端 H5 候选接口
+        // 若上次成功通道是某个 H5 接口，优先把它排到最前，减少每轮请求数
+        val allApis = listOf(
             "mtop.taobao.idle.sold.query" to "1.0",
             "mtop.idle.order.sold.list" to "1.0"
         )
+        val apis = allApis.sortedByDescending { it.first == lastSoldChannel }
+        var lastErr = sellerErr
+        var sessionDeadErr: String? = sellerErr.takeIf { isSessionDead(it) }
         for ((api, ver) in apis) {
             try {
                 val data = JSONObject().apply {
@@ -466,26 +535,57 @@ object MtopClient {
                 }
                 val r = callMtop(
                     cookie, api, ver, data,
-                    onCookieRefreshed = onCookieRefreshed,
-                    onResult = onResult
+                    onCookieRefreshed = onCookieRefreshed
                 )
-                if (!r.success) continue
-                val list = parseOrders(r.json)
-                if (list.isNotEmpty() || r.success) return list
+                if (r.success) {
+                    val list = parseOrders(r.json)
+                    lastSoldChannel = api
+                    onResult?.invoke(true, "成功")
+                    return list
+                } else {
+                    val e = r.retCode.ifBlank { r.message }
+                    // 风控立即短路
+                    if (isRiskControl(e)) {
+                        onResult?.invoke(false, e)
+                        return emptyList()
+                    }
+                    // 失效码要保住，不能被后面的普通错误覆盖掉
+                    if (isSessionDead(e)) {
+                        lastErr = e
+                        sessionDeadErr = e
+                        continue
+                    }
+                    if (sessionDeadErr == null) lastErr = e
+                }
             } catch (e: Exception) {
+                lastErr = e.message ?: "异常"
                 Log.e(TAG, "querySoldOrders($api) error", e)
             }
         }
+
+        // 所有通道都失败才回调；若其中出现过会话失效，优先上报失效码
+        onResult?.invoke(false, sessionDeadErr ?: lastErr)
         return emptyList()
     }
 
-    /** 兼容不同返回结构的订单解析。 */
+    /** 判断响应里是否存在可识别的订单数组（用于区分「真的没订单」与「结构不认识」）。 */
+    private fun hasOrderArray(root: JSONObject?): Boolean {
+        val data = root?.optJSONObject("data") ?: return false
+        return data.optJSONArray("orderList") != null ||
+            data.optJSONArray("list") != null ||
+            data.optJSONArray("itemSearchResponseList") != null ||
+            data.optJSONObject("data")?.optJSONArray("orderList") != null ||
+            data.optJSONObject("result")?.optJSONArray("list") != null
+    }
+
+    /** 兼容不同返回结构的订单解析（包含 PC 卖家结构与 H5 结构）。 */
     private fun parseOrders(root: JSONObject?): List<SoldOrder> {
         if (root == null) return emptyList()
         val data = root.optJSONObject("data") ?: return emptyList()
 
         val arr: JSONArray? = data.optJSONArray("orderList")
             ?: data.optJSONArray("list")
+            ?: data.optJSONArray("itemSearchResponseList")
             ?: data.optJSONObject("data")?.optJSONArray("orderList")
             ?: data.optJSONObject("result")?.optJSONArray("list")
         if (arr == null) return emptyList()
@@ -493,21 +593,46 @@ object MtopClient {
         val out = ArrayList<SoldOrder>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val orderId = firstNonBlank(
-                o, "orderId", "bizOrderId", "orderStr", "id"
-            ) ?: continue
-            val title = firstNonBlank(
-                o, "itemTitle", "title", "auctionTitle"
-            ) ?: ""
+            val common = o.optJSONObject("commonData")
+            val buyerVo = o.optJSONObject("buyerInfoVO")
+            val priceVo = o.optJSONObject("priceVO")
+
+            val orderId = firstNonBlank(o, "orderId", "bizOrderId", "orderStr", "id")
+                ?: (if (common != null) firstNonBlank(common, "orderId", "id") else null)
+                ?: continue
+
+            val title = firstNonBlank(o, "itemTitle", "title", "auctionTitle")
+                ?: (if (common != null) firstNonBlank(common, "itemTitle", "title") else null)
+                ?: ""
+
             val sku = firstNonBlank(o, "skuDesc", "sku", "propertyValue") ?: ""
-            val buyer = firstNonBlank(o, "buyerNick", "buyerName", "buyer") ?: ""
-            val status = firstNonBlank(o, "orderStatus", "status", "orderStatusName") ?: ""
+
+            val buyer = firstNonBlank(o, "buyerNick", "buyerName", "buyer")
+                ?: (if (buyerVo != null) firstNonBlank(buyerVo, "userNick", "nick", "name", "buyerNick") else null)
+                ?: ""
+
+            val status = firstNonBlank(o, "orderStatus", "status", "orderStatusName")
+                ?: (if (common != null) firstNonBlank(common, "orderStatus", "status") else null)
+                ?: "待发货"
+
             val qtyStr = firstNonBlank(o, "buyAmount", "buyQuantity", "itemNum", "quantity", "count")
+                ?: (if (priceVo != null) firstNonBlank(priceVo, "buyNum", "count", "quantity") else null)
             val qty = qtyStr?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-            val price = firstNonBlank(o, "actualPayFee", "totalPrice", "orderPrice", "price", "amount") ?: ""
-            val city = firstNonBlank(o, "receiverCity", "buyerCity", "city", "provCity", "buyerLocation") ?: ""
+
+            val price = firstNonBlank(o, "actualPayFee", "totalPrice", "orderPrice", "price", "amount")
+                ?: (if (priceVo != null) firstNonBlank(priceVo, "totalPrice", "price") else null)
+                ?: ""
+
+            val city = firstNonBlank(o, "receiverCity", "buyerCity", "city", "provCity", "buyerLocation")
+                ?: (if (buyerVo != null) firstNonBlank(buyerVo, "city", "address", "receiverCity") else null)
+                ?: ""
+
             val msg = firstNonBlank(o, "buyerMessage", "buyerRemark", "memo", "note", "message") ?: ""
-            val cTime = firstNonBlank(o, "createTime", "orderCreateTime", "orderTime", "gmtCreate", "payTime") ?: ""
+
+            val cTime = firstNonBlank(o, "createTime", "orderCreateTime", "orderTime", "gmtCreate", "payTime")
+                ?: (if (common != null) firstNonBlank(common, "createTime", "orderTime") else null)
+                ?: ""
+
             out.add(SoldOrder(orderId, title, sku, buyer, status, qty, price, city, msg, cTime))
         }
         return out

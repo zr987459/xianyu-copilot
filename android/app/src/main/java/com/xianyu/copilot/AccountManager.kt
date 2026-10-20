@@ -68,9 +68,11 @@ object AccountManager {
         val finalCookie = check.cookie.ifBlank { normalized }
 
         if (!check.valid) {
-            val isNetErr = check.message.contains("connection", ignoreCase = true) ||
-                check.message.contains("timeout", ignoreCase = true) ||
-                check.message.contains("connect", ignoreCase = true)
+            val m = check.message.lowercase()
+            val isNetErr = listOf(
+                "connection", "timeout", "connect", "unable to resolve host",
+                "ssl", "handshake", "network", "socket", "http 5", "http_5", "eof"
+            ).any { m.contains(it) }
             Log.w(TAG, "${source.label} 校验未通过: ${check.message} (isNetErr=$isNetErr)")
             val db = CardDatabase.get(context)
             val existing = db.getAccountCookie(unb)
@@ -86,10 +88,12 @@ object AccountManager {
                               else "Cookie 校验未通过：${check.message}（已有账号保持不变）"
                 )
             }
-            // 新账号：若是纯网络异常且库内无活跃账号，予以激活避免卡死；非网络异常则标为 EXPIRED
+            // 新账号：只有「确认登录态失效」才标 EXPIRED；网络异常、风控、解析失败等
+            // 一律按 ACTIVE 存，否则一次抖动就会永久打上「需重新登录」。
             val hasActive = db.getActiveAccount() != null
-            val shouldActivate = isNetErr && !hasActive
-            val status = if (isNetErr) "ACTIVE" else "EXPIRED"
+            val sessionDead = MtopClient.isSessionDead(check.message)
+            val shouldActivate = !sessionDead && !hasActive
+            val status = if (sessionDead) "EXPIRED" else "ACTIVE"
             db.addOrUpdateAccount(
                 userId = unb,
                 nick = parsed["tracknick"] ?: unb,
@@ -100,13 +104,16 @@ object AccountManager {
             )
             db.recordAccountCheck(unb, success = isNetErr, detail = check.message)
             return SaveResult(
-                ok = isNetErr,
+                ok = !sessionDead,
                 nick = parsed["tracknick"] ?: unb,
                 userId = unb,
                 cookie = finalCookie,
                 activated = shouldActivate,
-                message = if (isNetErr) "账号已保存（网络连接不顺畅，建议检查VPN/代理）"
-                          else "Cookie 校验未通过：${check.message}（已保存但未激活）"
+                message = when {
+                    sessionDead -> "登录已失效，请重新登录"
+                    isNetErr -> "账号已保存（网络连接不顺畅，建议检查 VPN / 代理）"
+                    else -> "账号已保存（本次校验未通过：${check.message}）"
+                }
             )
         }
 

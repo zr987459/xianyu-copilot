@@ -29,8 +29,41 @@ class CardDatabase private constructor(context: Context) :
 
         fun get(context: Context): CardDatabase =
             instance ?: synchronized(this) {
-                instance ?: CardDatabase(context).also { instance = it }
+                instance ?: CardDatabase(context).also {
+                    instance = it
+                    autoHealFalselyExpired(it)
+                }
             }
+
+        /**
+         * 一次性自愈历史因网络异常被误标为 EXPIRED 的账号。
+         *
+         * 用 settings 标记保证只跑一次，避免每次冷启动都把真实失效账号改回在线；
+         * 判定统一走 Kotlin 侧的 isSessionDead，不在 SQL 里另写一份关键字。
+         */
+        private fun autoHealFalselyExpired(db: CardDatabase) {
+            runCatching {
+                if (db.getSetting("heal_false_expired_v1", "0") == "1") return
+                val ids = ArrayList<String>()
+                db.readableDatabase.rawQuery(
+                    "SELECT user_id, last_check_msg FROM accounts WHERE status = 'EXPIRED'",
+                    null
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val uid = c.getString(0).orEmpty()
+                        val msg = c.getString(1).orEmpty()
+                        if (uid.isNotBlank() && !MtopClient.isSessionDead(msg)) ids.add(uid)
+                    }
+                }
+                for (uid in ids) {
+                    db.writableDatabase.execSQL(
+                        "UPDATE accounts SET status='ACTIVE' WHERE user_id=?",
+                        arrayOf(uid)
+                    )
+                }
+                db.saveSetting("heal_false_expired_v1", "1")
+            }
+        }
     }
 
     private val writeLock = Any()
@@ -439,11 +472,18 @@ class CardDatabase private constructor(context: Context) :
     fun recordAccountCheck(userId: String, success: Boolean, detail: String = "") = synchronized(writeLock) {
         val uid = userId.trim()
         if (uid.isEmpty()) return@synchronized
+        val ts = now()
+        val isDead = MtopClient.isSessionDead(detail)
         val cv = ContentValues().apply {
-            put("status", if (success) "ACTIVE" else "EXPIRED")
-            put("last_check_at", now())
+            if (success) {
+                put("status", "ACTIVE")
+            } else if (isDead) {
+                put("status", "EXPIRED")
+            }
+            // 关键修复：绝不把网络超时、无订单等常规错误误标为 EXPIRED！
+            put("last_check_at", ts)
             put("last_check_msg", detail.orEmpty())
-            put("updated_at", now())
+            put("updated_at", ts)
         }
         writableDatabase.update(T_ACCOUNTS, cv, "user_id=?", arrayOf(uid))
     }
