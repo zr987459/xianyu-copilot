@@ -108,15 +108,23 @@ object MtopClient {
     private val SESSION_DEAD_MARKERS = arrayOf(
         "FAIL_SYS_SESSION_EXPIRED",
         "FAIL_SYS_SESSION_EXOIRED",
-        "FAIL_SYS_USER_VALIDATE",
         "FAIL_SYS_LOGIN",
         "SESSION_EXPIRED",
         "请重新登录",
         "未登录"
     )
 
-    fun isSessionDead(ret: String): Boolean =
-        SESSION_DEAD_MARKERS.any { ret.contains(it, ignoreCase = true) }
+    /**
+     * 是否真的登录态失效。
+     *
+     * 注意：FAIL_SYS_USER_VALIDATE 属于风控/滑块，不是掉登录，绝不能判失效，
+     * 否则用户会看到「需重新登录」而实际只需稍后重试。
+     */
+    fun isSessionDead(ret: String): Boolean {
+        if (ret.isBlank()) return false
+        if (isRiskControl(ret)) return false
+        return SESSION_DEAD_MARKERS.any { ret.contains(it, ignoreCase = true) }
+    }
 
     /**
      * 从响应 Set-Cookie 中提取新令牌并合并回 Cookie 字符串。
@@ -211,8 +219,10 @@ object MtopClient {
             val merged = mergeSetCookie(baseCookie, first.setCookies)
             val newToken = MtopSigner.parseCookies(merged)["_m_h5_tk"]
             if (merged == baseCookie || newToken == oldToken) {
+                // 令牌已过期且拿不到新令牌 ⇒ 登录态实际已失效，映射成明确失效码，
+                // 否则上层只看 FAIL_SYS_TOKEN_EXOIRED 会误以为是可自愈的普通错误。
                 Log.w(TAG, "callMtop($api) 令牌未能刷新，判定登录态失效: ${first.retCode}")
-                return finish(false, first.message, first.json, first.retCode)
+                return finish(false, first.message, first.json, "FAIL_SYS_SESSION_EXPIRED")
             }
 
             Log.i(TAG, "callMtop($api) 令牌已刷新，重签重试一次")
@@ -221,7 +231,7 @@ object MtopClient {
             val retry = callMtopOnce(merged, api, version, dataObj, extraQuery, origin, referer, extraHeaders)
             if (retry.tokenExpired) {
                 Log.w(TAG, "callMtop($api) 刷新后仍过期，判定登录态失效")
-                return finish(false, retry.message, retry.json, retry.retCode)
+                return finish(false, retry.message, retry.json, "FAIL_SYS_SESSION_EXPIRED")
             }
             return finish(retry.success, retry.message, retry.json, retry.retCode)
         }
@@ -448,6 +458,10 @@ object MtopClient {
      * 官方标准卖家后台接口（mtop.taobao.idle.trade.merchant.sold.get）优先，
      * 失败回退 H5 接口，且绝不把候选轮询失败误报为登录失效。
      */
+    /** 上次成功的订单通道，优先复用，避免每轮扫描都试 3 个接口触发风控。 */
+    @Volatile
+    private var lastSoldChannel: String = "seller"
+
     fun querySoldOrders(
         cookie: String,
         onCookieRefreshed: ((String) -> Unit)? = null,
@@ -479,8 +493,22 @@ object MtopClient {
         )
         if (rSeller.success) {
             val list = parseOrders(rSeller.json)
-            onResult?.invoke(true, "成功")
-            return list
+            // 成功但结构不认识：打日志并继续回退，避免静默不发货
+            if (list.isEmpty() && !hasOrderArray(rSeller.json)) {
+                Log.w(TAG, "querySoldOrders 卖家接口成功但未识别出订单结构，回退备用通道")
+            } else {
+                lastSoldChannel = "seller"
+                onResult?.invoke(true, "成功")
+                return list
+            }
+        }
+
+        // 风控 / 会话失效立即短路，绝不让后续通道的无关错误覆盖真实原因
+        val sellerErr = rSeller.retCode.ifBlank { rSeller.message }
+        if (isRiskControl(sellerErr) || isSessionDead(sellerErr)) {
+            Log.w(TAG, "querySoldOrders 卖家接口判定为风控或会话失效，短路返回: $sellerErr")
+            onResult?.invoke(false, sellerErr)
+            return emptyList()
         }
 
         // 2) 备用：移动端 H5 候选接口
@@ -488,7 +516,7 @@ object MtopClient {
             "mtop.taobao.idle.sold.query" to "1.0",
             "mtop.idle.order.sold.list" to "1.0"
         )
-        var lastErr = rSeller.retCode.ifBlank { rSeller.message }
+        var lastErr = sellerErr
         for ((api, ver) in apis) {
             try {
                 val data = JSONObject().apply {
@@ -502,10 +530,17 @@ object MtopClient {
                 )
                 if (r.success) {
                     val list = parseOrders(r.json)
+                    lastSoldChannel = api
                     onResult?.invoke(true, "成功")
                     return list
                 } else {
-                    lastErr = r.retCode.ifBlank { r.message }
+                    val e = r.retCode.ifBlank { r.message }
+                    // 任一通道报风控/失效，立即上报真实原因，不被后续通道覆盖
+                    if (isRiskControl(e) || isSessionDead(e)) {
+                        onResult?.invoke(false, e)
+                        return emptyList()
+                    }
+                    lastErr = e
                 }
             } catch (e: Exception) {
                 lastErr = e.message ?: "异常"
@@ -516,6 +551,15 @@ object MtopClient {
         // 最终只有所有候选通道均失败时才回调，避免首通道回退误判
         onResult?.invoke(false, lastErr)
         return emptyList()
+    }
+
+    /** 判断响应里是否存在可识别的订单数组（用于区分「真的没订单」与「结构不认识」）。 */
+    private fun hasOrderArray(root: JSONObject?): Boolean {
+        val data = root?.optJSONObject("data") ?: return false
+        return data.optJSONArray("orderList") != null ||
+            data.optJSONArray("list") != null ||
+            data.optJSONObject("data")?.optJSONArray("orderList") != null ||
+            data.optJSONObject("result")?.optJSONArray("list") != null
     }
 
     /** 兼容不同返回结构的订单解析（包含 PC 卖家结构与 H5 结构）。 */

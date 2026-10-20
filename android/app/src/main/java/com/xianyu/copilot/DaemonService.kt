@@ -143,8 +143,12 @@ class DaemonService : Service() {
         val (checkedAt, ok, detail) = db.getAccountCheck(unb)
         // 从未校验过（刚升级/刚添加）不误报
         if (checkedAt == 0L) return
-        // 只有确认登录态失效才报警：网络抖动、接口业务错误不打扰用户
-        if (!ok && !MtopClient.isSessionDead(detail)) return
+        // 直接按账号 status 判断：status 现在只在真失效时才会被写成 EXPIRED，
+        // 不再依赖会被后续错误覆盖的 detail 文本。
+        if (!ok) {
+            val status = db.getAccountStatus(unb)
+            if (status != "EXPIRED") return
+        }
 
         if (ok) {
             if (cookieAlerted) {

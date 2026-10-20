@@ -31,22 +31,37 @@ class CardDatabase private constructor(context: Context) :
             instance ?: synchronized(this) {
                 instance ?: CardDatabase(context).also {
                     instance = it
-                    autoHealFalselyExpired(it.writableDatabase)
+                    autoHealFalselyExpired(it)
                 }
             }
 
-        /** 自愈历史因网络异常被误标为 EXPIRED 的账号。 */
-        private fun autoHealFalselyExpired(db: SQLiteDatabase) {
+        /**
+         * 一次性自愈历史因网络异常被误标为 EXPIRED 的账号。
+         *
+         * 用 settings 标记保证只跑一次，避免每次冷启动都把真实失效账号改回在线；
+         * 判定统一走 Kotlin 侧的 isSessionDead，不在 SQL 里另写一份关键字。
+         */
+        private fun autoHealFalselyExpired(db: CardDatabase) {
             runCatching {
-                db.execSQL(
-                    """
-                    UPDATE accounts SET status = 'ACTIVE'
-                    WHERE status = 'EXPIRED'
-                      AND last_check_msg NOT LIKE '%SESSION%'
-                      AND last_check_msg NOT LIKE '%重新登录%'
-                      AND last_check_msg NOT LIKE '%未登录%'
-                    """.trimIndent()
-                )
+                if (db.getSetting("heal_false_expired_v1", "0") == "1") return
+                val ids = ArrayList<String>()
+                db.readableDatabase.rawQuery(
+                    "SELECT user_id, last_check_msg FROM accounts WHERE status = 'EXPIRED'",
+                    null
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val uid = c.getString(0).orEmpty()
+                        val msg = c.getString(1).orEmpty()
+                        if (uid.isNotBlank() && !MtopClient.isSessionDead(msg)) ids.add(uid)
+                    }
+                }
+                for (uid in ids) {
+                    db.writableDatabase.execSQL(
+                        "UPDATE accounts SET status='ACTIVE' WHERE user_id=?",
+                        arrayOf(uid)
+                    )
+                }
+                db.saveSetting("heal_false_expired_v1", "1")
             }
         }
     }
