@@ -432,7 +432,8 @@ object MtopClient {
                 allowStoredBase = false
             )
             if (!r.success) {
-                return CookieCheck(false, cookie = refreshed, message = r.message)
+                // 用 retCode 优先，才能识别出「令牌刷新失败」被映射的会话失效码
+                return CookieCheck(false, cookie = refreshed, message = r.retCode.ifBlank { r.message })
             }
             val data = r.json?.optJSONObject("data")
             val nick = data?.let {
@@ -512,10 +513,12 @@ object MtopClient {
         }
 
         // 2) 备用：移动端 H5 候选接口
-        val apis = listOf(
+        // 若上次成功通道是某个 H5 接口，优先把它排到最前，减少每轮请求数
+        val allApis = listOf(
             "mtop.taobao.idle.sold.query" to "1.0",
             "mtop.idle.order.sold.list" to "1.0"
         )
+        val apis = allApis.sortedByDescending { it.first == lastSoldChannel }
         var lastErr = sellerErr
         for ((api, ver) in apis) {
             try {
@@ -558,6 +561,7 @@ object MtopClient {
         val data = root?.optJSONObject("data") ?: return false
         return data.optJSONArray("orderList") != null ||
             data.optJSONArray("list") != null ||
+            data.optJSONArray("itemSearchResponseList") != null ||
             data.optJSONObject("data")?.optJSONArray("orderList") != null ||
             data.optJSONObject("result")?.optJSONArray("list") != null
     }

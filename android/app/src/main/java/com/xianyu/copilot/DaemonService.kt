@@ -193,9 +193,28 @@ class DaemonService : Service() {
         }
         val unb = MtopSigner.parseCookies(cookie)["unb"].orEmpty()
 
-        // 每次调用的真实结果都写回该账号的健康状态，失效提醒才有依据
+        // 每次调用的真实结果都写回该账号的健康状态，失效提醒才有依据。
+        // 关键：准备写 EXPIRED 前必须用 loginuser.get 探针二次确认，
+        // 否则某个未验证过的接口返回会话类错误码时，会把好账号误标成失效。
         val recordResult: (Boolean, String) -> Unit = { ok, ret ->
-            if (unb.isNotBlank()) db.recordAccountCheck(unb, ok, ret)
+            if (unb.isNotBlank()) {
+                if (ok) {
+                    db.recordAccountCheck(unb, true, ret)
+                } else if (MtopClient.isSessionDead(ret)) {
+                    val probe = MtopClient.testCookieDetailed(db.getAccountCookie(unb).ifBlank { cookie })
+                    if (probe.valid) {
+                        // 探针通过 ⇒ 账号是好的，只记诊断，绝不翻转状态
+                        db.recordAccountCheck(unb, true, "接口报 ${ret.take(40)}，但登录态探针正常")
+                    } else {
+                        db.recordAccountCheck(unb, false, ret)
+                    }
+                } else {
+                    db.recordAccountCheck(unb, false, ret)
+                    if (MtopClient.isRiskControlPublic(ret)) {
+                        updateNotification("⚠️ 触发闲鱼风控，自动发货稍后自动重试")
+                    }
+                }
+            }
         }
 
         val orders = try {
@@ -209,7 +228,7 @@ class DaemonService : Service() {
             )
         } catch (e: Exception) {
             Log.w(TAG, "querySoldOrders failed", e)
-            if (unb.isNotBlank()) db.recordAccountCheck(unb, false, e.message ?: "异常")
+            if (unb.isNotBlank()) recordResult(false, e.message ?: "异常")
             notifyIfCookieBroken(db)
             return@withLock
         }
