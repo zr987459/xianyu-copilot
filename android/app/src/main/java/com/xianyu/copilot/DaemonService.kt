@@ -54,6 +54,7 @@ class DaemonService : Service() {
     /** Cookie 健康检查节流（每 5 分钟最多提醒一次）。 */
     @Volatile private var lastCookieCheckAt: Long = 0L
     @Volatile private var cookieAlerted: Boolean = false
+    @Volatile private var riskAlerted: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -200,17 +201,31 @@ class DaemonService : Service() {
             if (unb.isNotBlank()) {
                 if (ok) {
                     db.recordAccountCheck(unb, true, ret)
+                    // 恢复正常后把风控提示收回，避免通知栏一直挂着告警
+                    if (riskAlerted) {
+                        riskAlerted = false
+                        updateNotification("闲鱼管家正在守护中 · 自动发货就绪")
+                    }
                 } else if (MtopClient.isSessionDead(ret)) {
                     val probe = MtopClient.testCookieDetailed(db.getAccountCookie(unb).ifBlank { cookie })
+                    // 探针刷新出的新 Cookie 要落库，否则每次都要重新握手
+                    if (probe.cookie.isNotBlank() && probe.cookie != cookie) {
+                        AccountManager.persistRefreshedCookie(applicationContext, probe.cookie)
+                    }
                     if (probe.valid) {
                         // 探针通过 ⇒ 账号是好的，只记诊断，绝不翻转状态
                         db.recordAccountCheck(unb, true, "接口报 ${ret.take(40)}，但登录态探针正常")
-                    } else {
+                    } else if (MtopClient.isSessionDead(probe.message)) {
+                        // 探针也确认失效，才允许写 EXPIRED
                         db.recordAccountCheck(unb, false, ret)
+                    } else {
+                        // 探针自身遭遇网络抖动/风控：只记诊断，不翻转状态
+                        db.recordAccountCheck(unb, true, "探针未确认失效(${probe.message.take(30)})")
                     }
                 } else {
                     db.recordAccountCheck(unb, false, ret)
                     if (MtopClient.isRiskControlPublic(ret)) {
+                        riskAlerted = true
                         updateNotification("⚠️ 触发闲鱼风控，自动发货稍后自动重试")
                     }
                 }

@@ -504,12 +504,17 @@ object MtopClient {
             }
         }
 
-        // 风控 / 会话失效立即短路，绝不让后续通道的无关错误覆盖真实原因
+        // 只有风控才短路。会话类错误必须继续走 H5 通道：
+        // 这个卖家接口尚未用真实账号验证，若它对普通卖家恒报会话错误，
+        // 直接短路会造成「界面显示在线，却一单都不发」这种更隐蔽的问题。
         val sellerErr = rSeller.retCode.ifBlank { rSeller.message }
-        if (isRiskControl(sellerErr) || isSessionDead(sellerErr)) {
-            Log.w(TAG, "querySoldOrders 卖家接口判定为风控或会话失效，短路返回: $sellerErr")
+        if (isRiskControl(sellerErr)) {
+            Log.w(TAG, "querySoldOrders 卖家接口触碰风控，短路返回: $sellerErr")
             onResult?.invoke(false, sellerErr)
             return emptyList()
+        }
+        if (isSessionDead(sellerErr)) {
+            Log.w(TAG, "querySoldOrders 卖家接口报会话失效，继续尝试 H5 通道")
         }
 
         // 2) 备用：移动端 H5 候选接口
@@ -520,6 +525,7 @@ object MtopClient {
         )
         val apis = allApis.sortedByDescending { it.first == lastSoldChannel }
         var lastErr = sellerErr
+        var sessionDeadErr: String? = null
         for ((api, ver) in apis) {
             try {
                 val data = JSONObject().apply {
@@ -538,12 +544,18 @@ object MtopClient {
                     return list
                 } else {
                     val e = r.retCode.ifBlank { r.message }
-                    // 任一通道报风控/失效，立即上报真实原因，不被后续通道覆盖
-                    if (isRiskControl(e) || isSessionDead(e)) {
+                    // 风控立即短路
+                    if (isRiskControl(e)) {
                         onResult?.invoke(false, e)
                         return emptyList()
                     }
-                    lastErr = e
+                    // 失效码要保住，不能被后面的普通错误覆盖掉
+                    if (isSessionDead(e)) {
+                        lastErr = e
+                        sessionDeadErr = e
+                        continue
+                    }
+                    if (sessionDeadErr == null) lastErr = e
                 }
             } catch (e: Exception) {
                 lastErr = e.message ?: "异常"
@@ -551,8 +563,8 @@ object MtopClient {
             }
         }
 
-        // 最终只有所有候选通道均失败时才回调，避免首通道回退误判
-        onResult?.invoke(false, lastErr)
+        // 所有通道都失败才回调；若其中出现过会话失效，优先上报失效码
+        onResult?.invoke(false, sessionDeadErr ?: lastErr)
         return emptyList()
     }
 

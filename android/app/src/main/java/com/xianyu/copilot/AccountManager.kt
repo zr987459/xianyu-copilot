@@ -71,7 +71,7 @@ object AccountManager {
             val m = check.message.lowercase()
             val isNetErr = listOf(
                 "connection", "timeout", "connect", "unable to resolve host",
-                "ssl", "handshake", "network", "socket", "http 5", "eof"
+                "ssl", "handshake", "network", "socket", "http 5", "http_5", "eof"
             ).any { m.contains(it) }
             Log.w(TAG, "${source.label} 校验未通过: ${check.message} (isNetErr=$isNetErr)")
             val db = CardDatabase.get(context)
