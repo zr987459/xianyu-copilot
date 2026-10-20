@@ -219,8 +219,9 @@ class DaemonService : Service() {
                         // 探针也确认失效，才允许写 EXPIRED
                         db.recordAccountCheck(unb, false, ret)
                     } else {
-                        // 探针自身遭遇网络抖动/风控：只记诊断，不翻转状态
-                        db.recordAccountCheck(unb, true, "探针未确认失效(${probe.message.take(30)})")
+                        // 探针自身遭遇网络抖动/风控：传 false，recordAccountCheck 在没有失效标记时
+                        // 本来就不会动 status，只记诊断；传 true 会把真失效账号翻回在线。
+                        db.recordAccountCheck(unb, false, "探针未确认失效(${probe.message.take(30)})")
                     }
                 } else {
                     db.recordAccountCheck(unb, false, ret)

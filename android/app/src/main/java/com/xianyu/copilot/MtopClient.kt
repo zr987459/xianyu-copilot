@@ -525,7 +525,7 @@ object MtopClient {
         )
         val apis = allApis.sortedByDescending { it.first == lastSoldChannel }
         var lastErr = sellerErr
-        var sessionDeadErr: String? = null
+        var sessionDeadErr: String? = sellerErr.takeIf { isSessionDead(it) }
         for ((api, ver) in apis) {
             try {
                 val data = JSONObject().apply {
