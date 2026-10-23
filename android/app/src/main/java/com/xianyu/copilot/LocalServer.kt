@@ -217,7 +217,8 @@ class LocalServer(private val context: Context) {
     private fun writeResponse(out: OutputStream, resp: Response) {
         val reason = when (resp.status) {
             200 -> "OK"; 201 -> "Created"; 204 -> "No Content"
-            400 -> "Bad Request"; 404 -> "Not Found"; 405 -> "Method Not Allowed"
+            400 -> "Bad Request"; 401 -> "Unauthorized"; 403 -> "Forbidden"; 404 -> "Not Found"
+            405 -> "Method Not Allowed"; 429 -> "Too Many Requests"
             500 -> "Internal Server Error"
             else -> "OK"
         }
@@ -319,8 +320,16 @@ class LocalServer(private val context: Context) {
         return diff == 0
     }
 
+    private val apiV2 by lazy { ApiV2(context) }
+
     private fun routeApi(req: Request): Response {
         val path = req.path
+        // v1.5.0 新接口（消息 / 自动回复 / AI / 通知 / 订单 / 商品管理 / 采集）
+        try {
+            apiV2.handle(req.method, path, req.query, req.body)?.let { (code, obj) -> return jsonResponse(obj, code) }
+        } catch (e: Throwable) {
+            return jsonError(500, "api error: ${e.message ?: e.javaClass.simpleName}")
+        }
         return try {
             when {
                 path == "/api/stats" -> apiStats()
@@ -333,8 +342,6 @@ class LocalServer(private val context: Context) {
                 path == "/api/accounts/import_cookie" || path == "/api/auth/cookie/login" -> if (req.method == "POST") apiImportCookie(req.body) else methodNotAllowed()
                 path == "/api/auth/qrcode/create" -> if (req.method == "POST") apiCreateQrCode() else methodNotAllowed()
                 path == "/api/auth/qrcode/check" -> if (req.method == "GET") apiCheckQrCode(req.query) else methodNotAllowed()
-                path == "/api/chats" -> jsonOk(JSONObject().put("chats", JSONArray()))
-                path == "/api/chat/messages" -> jsonOk(JSONObject().put("messages", JSONArray()))
                 path == "/api/cards/stock" -> apiCardsStock(req.query)
                 path == "/api/cards/list" || path == "/api/cards" -> when (req.method) {
                     "GET" -> apiGetCards(req.query)
@@ -369,11 +376,6 @@ class LocalServer(private val context: Context) {
                     "POST" -> apiPostConfig(req.body)
                     else -> methodNotAllowed()
                 }
-                path == "/api/prompts" -> when (req.method) {
-                    "GET" -> jsonOk(JSONObject().put("prompts", JSONObject()))
-                    "POST" -> jsonOk()
-                    else -> methodNotAllowed()
-                }
                 path == "/api/daemon" -> apiGetDaemon()
                 path == "/api/daemon/toggle" -> apiToggleDaemon()
                 else -> jsonError(404, "unknown api: $path")
@@ -395,9 +397,10 @@ class LocalServer(private val context: Context) {
         val nick = activeAcc?.nick ?: db.getSetting("cookie_nick", "")
 
         val res = JSONObject().apply {
-            put("total_msgs", 0)
-            put("total_users", 0)
-            put("total_items", 0)
+            val ops = OpsDatabase.get(context)
+            put("total_msgs", ops.count("SELECT COUNT(*) FROM messages"))
+            put("total_users", ops.count("SELECT COUNT(*) FROM conversations"))
+            put("total_items", ops.count("SELECT COUNT(*) FROM items"))
             put("total_delivered", stats.todayDelivered)
             put("available_cards", stats.availableCards)
             put("used_cards", stats.usedCards)
@@ -670,6 +673,9 @@ class LocalServer(private val context: Context) {
             o.put("fixed_content", r.fixedContent)
             o.put("trade_text", r.tradeText)
             o.put("created_at", r.createdAt)
+            o.put("delay_minutes", r.delayMinutes)
+            o.put("template_id", r.templateId)
+            o.put("send_im", if (r.sendIm) 1 else 0)
             arr.put(o)
         }
         val out = JSONObject()
@@ -690,7 +696,10 @@ class LocalServer(private val context: Context) {
         if (keyword.isEmpty()) return jsonError(400, "keyword required")
 
         val db = CardDatabase.get(context)
-        val savedId = db.saveRule(id, keyword, sku, usePool, fixedContent, tradeText)
+        val delay = json.optInt("delay_minutes", 0)
+        val templateId = json.optLong("template_id", 0L)
+        val sendIm = if (json.has("send_im")) json.optInt("send_im", 1) == 1 else true
+        val savedId = db.saveRule(id, keyword, sku, usePool, fixedContent, tradeText, delay, templateId, sendIm)
         val out = JSONObject().put("id", savedId)
         return jsonOk(out)
     }
@@ -727,6 +736,8 @@ class LocalServer(private val context: Context) {
                 put("buyerCity", o.buyerCity)
                 put("buyerMessage", o.buyerMessage)
                 put("createTime", o.createTime)
+                put("buyerId", o.buyerId)
+                put("itemId", o.itemId)
             }
             arr.put(item)
         }
@@ -745,52 +756,18 @@ class LocalServer(private val context: Context) {
         if (cookie.isBlank()) return jsonError(400, "未绑定闲鱼账号")
         if (orderId.isBlank()) return jsonError(400, "订单号不能为空")
 
-        val rule = db.matchRule(title, sku)
-        val tradeText = rule?.tradeText?.ifBlank { "虚拟商品已自动交付" } ?: "虚拟商品已自动交付"
-
-        // 幂等：该订单是否已经发过货（卡密已出库 / 已有成功日志），避免重复发送
-        val alreadyShipped = db.hasOrderDelivered(orderId)
-        if (alreadyShipped) {
-            return jsonOk(
-                JSONObject().apply {
-                    put("ok", true)
-                    put("success", true)
-                    put("duplicated", true)
-                    put("message", "该订单此前已发货，未重复发送")
-                    put("cardsDelivered", 0)
-                }
-            )
+        val acc = json.optString("account").ifBlank { db.getActiveAccount()?.userId.orEmpty() }
+        // v1.5.0：走统一发货引擎（模板 / IM 私信 / 幂等任务表），与自动发货完全一致
+        val r = kotlinx.coroutines.runBlocking {
+            DeliveryEngine.shipNow(context, orderId, acc, title, sku, qty,
+                json.optString("buyerId"), json.optString("buyer"), json.optString("itemId"))
         }
-
-        val cardList = mutableListOf<String>()
-        if (rule?.usePool == true) {
-            cardList.addAll(db.claimCardsAtomic(rule.keyword, rule.sku, orderId, qty))
-        }
-
-        val content = buildString {
-            if (cardList.isNotEmpty()) {
-                append("🎫 卡密已发放 [${cardList.size}件]:\n")
-                cardList.forEachIndexed { i, c -> append("${i + 1}. $c\n") }
-            }
-            if (rule?.fixedContent?.isNotBlank() == true) {
-                if (cardList.isNotEmpty()) append("\n")
-                append(rule.fixedContent)
-            }
-        }.trim()
-
-        val (ok, msg) = MtopClient.confirmDummyShipping(
-            cookie, orderId, tradeText,
-            onCookieRefreshed = { refreshed ->
-                AccountManager.persistRefreshedCookie(context, refreshed)
-            }
-        )
-        db.recordLog(orderId, rule?.keyword ?: "手动发货", content, if (ok) "发货完成" else "发货反馈: $msg")
-
         val out = JSONObject().apply {
-            put("ok", ok)
-            put("success", ok)
-            put("message", if (ok) "发货成功！" else msg)
-            put("cardsDelivered", cardList.size)
+            put("ok", r.ok)
+            put("success", r.ok)
+            put("duplicated", r.duplicated)
+            put("message", r.message)
+            put("cardsDelivered", r.cardsDelivered)
         }
         return jsonResponse(out)
     }
@@ -836,7 +813,10 @@ class LocalServer(private val context: Context) {
             return jsonError(status, msg)
         }
         val arr = JSONArray()
+        val ops = OpsDatabase.get(context)
+        val accId = db.getActiveAccount()?.userId.orEmpty()
         for (it in res.items) {
+            runCatching { ops.upsertItem(it.id, accId, it.title, it.price, "", it.imageUrl, it.status) }
             arr.put(JSONObject().apply {
                 put("id", it.id)
                 put("title", it.title)
@@ -845,6 +825,7 @@ class LocalServer(private val context: Context) {
                 put("status", it.status)
                 put("detailUrl", it.detailUrl)
                 put("source", it.source)
+                put("onSale", it.onSale)
             })
         }
         return jsonOk(JSONObject().put("items", arr).put("count", arr.length()).put("source", res.source).put("ok", true))

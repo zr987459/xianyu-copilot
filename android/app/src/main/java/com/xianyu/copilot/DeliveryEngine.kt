@@ -85,13 +85,14 @@ object DeliveryEngine {
 
     /** 手动「立即发货」：忽略延时，同步执行并返回结果。 */
     suspend fun shipNow(
-        context: Context, orderId: String, accountId: String, title: String, sku: String, quantity: Int
+        context: Context, orderId: String, accountId: String, title: String, sku: String, quantity: Int,
+        buyerId: String = "", buyerNick: String = "", itemId: String = ""
     ): Outcome {
         val db = CardDatabase.get(context)
         if (db.hasOrderDelivered(orderId)) return Outcome(true, "该订单此前已发货，未重复发送", duplicated = true)
         val ops = OpsDatabase.get(context)
-        ops.upsertOrder(orderId, accountId, "", title, sku, quantity, "", "", "", "", "待发货", "MANUAL")
-        ops.enqueueTask(orderId, accountId, "", "", "", "", title, sku, quantity, "MANUAL", System.currentTimeMillis())
+        ops.upsertOrder(orderId, accountId, itemId, title, sku, quantity, "", buyerId, buyerNick, "", "待发货", "MANUAL")
+        ops.enqueueTask(orderId, accountId, "", buyerId, buyerNick, itemId, title, sku, quantity, "MANUAL", System.currentTimeMillis())
         return mutex.withLock {
             val t = ops.task(orderId) ?: return@withLock Outcome(false, "任务登记失败")
             // 手动发货允许重试 FAILED / NO_RULE / 尚在延时中的任务
