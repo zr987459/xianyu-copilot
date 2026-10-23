@@ -11,7 +11,7 @@
   --bg:#f4f5f7;--card:#fff;--primary:#ff6b00;--primary-d:#e05e00;
   --text:#141518;--sub:#6b7280;--border:#e9eaee;
   --ok:#16a34a;--err:#dc2626;--warn:#f59e0b;
-  --r:14px;--sh:0 1px 8px rgba(16,20,30,.06);
+  --r:14px;--sh:0 1px 8px rgba(16,20,30,.06);--brand:#ff6b00;--muted:#6b7280;
   --sb:env(safe-area-inset-bottom,0px);
 }
 body{background:var(--bg);color:var(--text);font-size:14px;padding-bottom:calc(70px + var(--sb));min-height:100vh}
@@ -144,6 +144,36 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
 .pub-item .title{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px}
 .pub-item .meta{display:flex;justify-content:space-between;align-items:center;font-size:11px}
 .pub-item .price{color:var(--brand);font-weight:700;font-size:13.5px}
+.sub-hd{display:flex;align-items:center;gap:8px;margin:0 0 12px}
+.sub-hd b{font-size:15px}
+.sub-hd .m{font-size:10.5px;color:var(--sub)}
+.m{font-size:11px;color:var(--sub);line-height:1.6}
+.fgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.fi{background:#fff;border-radius:12px;box-shadow:var(--sh);padding:14px 6px;text-align:center;font-size:12px;font-weight:600;cursor:pointer}
+.fi span{display:block;font-size:22px;margin-bottom:5px}
+.fi:active{transform:scale(.97)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;padding:6px 0}
+.row input[type=checkbox]{width:18px;height:18px;accent-color:var(--primary)}
+.fld.sm{width:96px;padding:6px 8px}
+.conv{display:flex;gap:10px;align-items:center;background:#fff;border-radius:12px;padding:10px;margin-bottom:8px;box-shadow:var(--sh);cursor:pointer;position:relative}
+.cav{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#ffd2a8,#ff9a4d);flex:none;object-fit:cover}
+.conv .n{display:flex;align-items:center;gap:5px;font-size:13.5px;font-weight:600}
+.conv .t{margin-left:auto;font-size:10.5px;color:#9aa0ab;font-weight:400}
+.ub{position:absolute;right:10px;bottom:10px;background:var(--err);color:#fff;font-size:10px;border-radius:10px;padding:1px 6px}
+.msgbox{height:calc(100vh - 250px);overflow-y:auto;padding:4px 2px 10px}
+.bub{max-width:80%;margin:6px 0;display:flex;flex-direction:column}
+.bub.in{align-items:flex-start}
+.bub.out{align-items:flex-end;margin-left:auto}
+.bt{padding:8px 11px;border-radius:14px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:#fff;box-shadow:var(--sh)}
+.bub.out .bt{background:var(--primary);color:#fff}
+.bm{font-size:10px;color:#9aa0ab;margin-top:2px}
+.sys{text-align:center;font-size:10.5px;color:#9aa0ab;margin:8px 0}
+.chat-input{display:flex;gap:8px;align-items:flex-end;padding-top:8px}
+.chat-input textarea{flex:1;font-family:inherit}
+.nbadge{position:absolute;top:2px;left:55%;background:var(--err);color:#fff;font-size:9px;border-radius:9px;padding:0 5px;display:none}
+.ni{position:relative}
+.acts{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.acts .btn{padding:4px 9px;font-size:11px}
 </style>
 </head>
 <body>
@@ -174,6 +204,14 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
     </div>
     <button class="sw" id="dSw" onclick="toggleDaemon()"></button>
   </div>
+
+  <div class="grid2 sec" style="grid-template-columns:repeat(4,1fr);gap:7px">
+    <div class="stat"><div class="n" id="dMsg">0</div><div class="l">今日消息</div></div>
+    <div class="stat"><div class="n" id="dOrd">0</div><div class="l">今日订单</div></div>
+    <div class="stat"><div class="n" id="dDel">0</div><div class="l">成功发货</div></div>
+    <div class="stat"><div class="n" id="dRev" style="font-size:15px">¥0</div><div class="l">今日营收</div></div>
+  </div>
+  <div class="m" id="dTips" style="margin:-6px 0 12px"></div>
 
   <div class="grid3 sec">
     <div class="stat"><div class="n" id="sToday">0</div><div class="l">今日发货</div></div>
@@ -229,6 +267,7 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
 
 <!-- ========== 规则 ========== -->
 <div class="pane" id="pane-rules">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>发货规则</b></div>
   <div class="sec">
     <div class="st"><span class="l">⚙️ 自动发货规则</span><span class="r" id="ruleCnt">0 条</span></div>
     <div class="card">
@@ -240,6 +279,14 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
       <textarea class="fld" id="rFixed" rows="3" placeholder="例如：网盘链接 https://... 提取码 abcd"></textarea>
       <span class="lbl" style="margin-top:9px">发货确认语（发送给买家的提示文案）</span>
       <input class="fld" id="rTrade" placeholder="虚拟商品已自动交付，请查收~" style="margin-bottom:10px">
+      <div class="grid2" style="margin-bottom:10px">
+        <div><span class="lbl">发货模板</span><select class="fld" id="rTpl"><option value="0">默认格式（卡密 + 附言）</option></select></div>
+        <div><span class="lbl">延时发货（分钟）</span><input class="fld" id="rDelay" type="number" min="0" placeholder="0 = 立即"></div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;margin-bottom:8px">
+        <input type="checkbox" id="rSendIm" checked style="width:16px;height:16px;accent-color:var(--primary)">
+        通过闲鱼消息把发货内容私信给买家
+      </label>
       <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;margin-bottom:10px">
         <input type="checkbox" id="rUsePool" checked style="width:16px;height:16px;accent-color:var(--primary)">
         从卡密池自动出库（独享卡密）
@@ -286,6 +333,7 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
 
 <!-- ========== 上架 ========== -->
 <div class="pane" id="pane-pub">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>发布商品</b></div>
   <div class="sec">
     <div class="st"><span class="l">🚀 免浏览器一键上架</span></div>
     <div class="card">
@@ -320,6 +368,213 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
   </div>
 </div>
 
+<!-- ========== 消息 ========== -->
+<div class="pane" id="pane-msg">
+  <div class="sec">
+    <div class="st"><span class="l">💬 消息中心</span><span class="r" id="imState">IM 未连接</span></div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <select class="fld" id="msgAcc" style="flex:1" onchange="curAcc=this.value;loadChats()"></select>
+      <button class="btn sm gray" onclick="loadChats(true)">同步会话</button>
+    </div>
+    <input class="fld" id="chatSearch" placeholder="搜索买家 / 消息 / 商品ID" oninput="clearTimeout(window._cs);window._cs=setTimeout(loadChats,300)" style="margin-bottom:10px">
+    <div id="chatList"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
+<!-- ========== 聊天 ========== -->
+<div class="pane" id="pane-chat">
+  <div class="sub-hd"><button class="ib" onclick="go('msg')">‹</button><div style="flex:1;min-width:0"><b id="chatTitle">会话</b><div class="m" id="chatSub"></div></div>
+    <button class="btn sm gray" id="chatPauseBtn" onclick="togglePause()">接管</button>
+    <button class="btn sm gray" onclick="loadMessages(true)">历史</button></div>
+  <div id="msgBox" class="msgbox"></div>
+  <div class="chat-input">
+    <textarea class="fld" id="chatText" rows="2" placeholder="输入回复内容（发送后自动进入人工接管）"></textarea>
+    <button class="btn" onclick="sendChat()">发送</button>
+  </div>
+</div>
+
+<!-- ========== 功能 ========== -->
+<div class="pane" id="pane-more">
+  <div class="sec">
+    <div class="st"><span class="l">🧰 全部功能</span></div>
+    <div class="fgrid">
+      <div class="fi" onclick="go('reply')"><span>🤖</span>自动回复</div>
+      <div class="fi" onclick="go('ai')"><span>🧠</span>AI 客服</div>
+      <div class="fi" onclick="go('rules')"><span>⚙️</span>发货规则</div>
+      <div class="fi" onclick="go('tpl')"><span>📝</span>发货模板</div>
+      <div class="fi" onclick="go('orders')"><span>🧾</span>订单管理</div>
+      <div class="fi" onclick="go('items')"><span>🛍️</span>商品管理</div>
+      <div class="fi" onclick="go('pub')"><span>🚀</span>发布商品</div>
+      <div class="fi" onclick="go('collect')"><span>🔗</span>采集复制</div>
+      <div class="fi" onclick="go('sens')"><span>🚫</span>敏感词</div>
+      <div class="fi" onclick="go('notify')"><span>🔔</span>通知渠道</div>
+      <div class="fi" onclick="go('set')"><span>🛠️</span>系统设置</div>
+      <div class="fi" onclick="go('acc')"><span>👥</span>多账号</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 自动回复 ========== -->
+<div class="pane" id="pane-reply">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>自动回复</b></div>
+  <div class="card">
+    <label class="row"><span>自动回复总开关</span><input type="checkbox" id="s_auto_reply_enabled"></label>
+    <label class="row"><span>人工回复后暂停自动回复（分钟，0=不暂停）</span><input class="fld sm" id="s_manual_pause_minutes" type="number"></label>
+    <label class="row"><span>连发防抖（毫秒）</span><input class="fld sm" id="s_reply_debounce_ms" type="number"></label>
+    <label class="row"><span>同会话冷却（秒）</span><input class="fld sm" id="s_reply_cooldown_sec" type="number"></label>
+    <label class="row"><span>启用默认回复（无匹配时）</span><input type="checkbox" id="s_default_reply_enabled"></label>
+    <label class="row"><span>默认回复每个会话只发一次</span><input type="checkbox" id="s_default_reply_once"></label>
+    <textarea class="fld" id="s_default_reply_text" rows="2" placeholder="默认回复，可用 {买家}"></textarea>
+    <button class="btn full" style="margin-top:9px" onclick="saveSettings('reply')">保存设置</button>
+  </div>
+  <div class="st"><span class="l">🔑 关键词回复</span><span class="r" id="kwCnt"></span></div>
+  <div class="card">
+    <input type="hidden" id="kwId">
+    <input class="fld" id="kwKey" placeholder="关键词，多个用 | 分隔，如：在吗|还在吗" style="margin-bottom:8px">
+    <textarea class="fld" id="kwReply" rows="2" placeholder="回复内容，可用 {买家} {商品ID}"></textarea>
+    <div class="grid2" style="margin-top:8px">
+      <select class="fld" id="kwMatch"><option value="contains">包含匹配</option><option value="exact">精确匹配</option></select>
+      <input class="fld" id="kwItem" placeholder="限定商品ID（可空）">
+    </div>
+    <div class="grid2" style="margin-top:8px">
+      <select class="fld" id="kwAcc"></select>
+      <input class="fld" id="kwPri" type="number" placeholder="优先级(大优先)">
+    </div>
+    <button class="btn full" style="margin-top:9px" onclick="saveKw()">保存关键词</button>
+  </div>
+  <div id="kwList"></div>
+  <div class="st"><span class="l">📦 商品专属回复 / 底价</span></div>
+  <div class="card">
+    <input class="fld" id="irItem" placeholder="商品ID" style="margin-bottom:8px">
+    <textarea class="fld" id="irReply" rows="2" placeholder="该商品的固定回复（留空则交给 AI）"></textarea>
+    <input class="fld" id="irFloor" type="number" step="0.01" placeholder="AI 议价底价（元，可空）" style="margin-top:8px">
+    <button class="btn full" style="margin-top:9px" onclick="saveIr()">保存</button>
+  </div>
+  <div id="irList"></div>
+  <div class="st"><span class="l">🧪 回复测试</span></div>
+  <div class="card">
+    <div style="display:flex;gap:8px"><input class="fld" id="trText" placeholder="模拟买家消息，如：能便宜点吗"><input class="fld" id="trItem" placeholder="商品ID" style="width:38%"></div>
+    <button class="btn gray full" style="margin-top:8px" onclick="testReply()">试一下</button>
+    <div id="trOut" class="m" style="margin-top:8px;white-space:pre-wrap"></div>
+  </div>
+</div>
+
+<!-- ========== AI ========== -->
+<div class="pane" id="pane-ai">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>AI 客服 / 议价</b></div>
+  <div class="card">
+    <label class="row"><span>启用 AI 回复</span><input type="checkbox" id="ai_enabled"></label>
+    <span class="lbl">接口类型</span>
+    <select class="fld" id="ai_provider" style="margin-bottom:8px"><option value="openai">OpenAI 兼容（DeepSeek/通义/Kimi/OpenRouter…）</option><option value="anthropic">Anthropic Claude</option></select>
+    <span class="lbl">Base URL</span><input class="fld" id="ai_base_url" placeholder="https://api.deepseek.com/v1" style="margin-bottom:8px">
+    <span class="lbl">模型</span><input class="fld" id="ai_model" placeholder="deepseek-chat / claude-sonnet-4-5" style="margin-bottom:8px">
+    <span class="lbl">API Key <small id="aiKeyMask" class="m"></small></span><input class="fld" id="ai_api_key" type="password" placeholder="留空表示不修改" style="margin-bottom:8px">
+    <div class="grid3">
+      <div><span class="lbl">最大优惠%</span><input class="fld" id="ai_max_discount_percent" type="number"></div>
+      <div><span class="lbl">最大优惠元</span><input class="fld" id="ai_max_discount_amount" type="number"></div>
+      <div><span class="lbl">议价轮数</span><input class="fld" id="ai_max_bargain_rounds" type="number"></div>
+    </div>
+    <span class="lbl" style="margin-top:8px">温度</span><input class="fld" id="ai_temperature" type="number" step="0.1">
+    <div class="grid2" style="margin-top:10px"><button class="btn" onclick="saveAi()">保存</button><button class="btn gray" onclick="testAi()">连通测试</button></div>
+    <div id="aiOut" class="m" style="margin-top:8px;white-space:pre-wrap"></div>
+  </div>
+  <div class="st"><span class="l">📜 提示词（留空恢复内置）</span></div>
+  <div class="card">
+    <span class="lbl">通用 default</span><textarea class="fld" id="pr_default" rows="5"></textarea>
+    <span class="lbl" style="margin-top:8px">议价 price</span><textarea class="fld" id="pr_price" rows="5"></textarea>
+    <span class="lbl" style="margin-top:8px">技术 tech</span><textarea class="fld" id="pr_tech" rows="5"></textarea>
+    <button class="btn full" style="margin-top:9px" onclick="savePrompts()">保存提示词</button>
+  </div>
+</div>
+
+<!-- ========== 发货模板 ========== -->
+<div class="pane" id="pane-tpl">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>发货模板</b></div>
+  <div class="card">
+    <input type="hidden" id="tplId">
+    <input class="fld" id="tplName" placeholder="模板名称" style="margin-bottom:8px">
+    <textarea class="fld" id="tplContent" rows="6" placeholder="亲，{买家} 您好！您购买的 {商品} × {数量} 已发货：&#10;{卡密列表}&#10;订单号：{订单号}&#10;{附言}"></textarea>
+    <div class="m" style="margin:6px 0">变量：{卡密} {卡密列表} {订单号} {买家} {商品} {规格} {数量} {时间} {附言}</div>
+    <button class="btn full" onclick="saveTpl()">保存模板</button>
+  </div>
+  <div id="tplList"></div>
+</div>
+
+<!-- ========== 订单 ========== -->
+<div class="pane" id="pane-orders">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>订单管理</b>
+    <select class="fld sm" id="ordFilter" onchange="loadOrderList()" style="width:auto"><option value="">全部</option><option>待发货</option><option>已发货</option><option>发货失败</option><option>待付款</option><option>交易关闭</option></select></div>
+  <div id="ordAll"><div class="empty">加载中…</div></div>
+</div>
+
+<!-- ========== 商品管理 ========== -->
+<div class="pane" id="pane-items">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>商品管理</b>
+    <button class="btn sm gray" onclick="polishAll(this)">一键擦亮</button></div>
+  <div class="m" style="margin-bottom:8px">擦亮 / 改价 / 下架 / 重新上架均调用闲鱼官方接口；虚拟商品可能不支持 PC 端重新上架。</div>
+  <div id="itemList"><div class="empty">加载中…</div></div>
+</div>
+
+<!-- ========== 采集复制 ========== -->
+<div class="pane" id="pane-collect">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>采集复制</b></div>
+  <div class="card">
+    <input class="fld" id="colUrl" placeholder="粘贴闲鱼商品链接或商品ID" style="margin-bottom:8px">
+    <div class="grid2"><button class="btn gray" onclick="collect(false)">解析预览</button><button class="btn" onclick="collect(true)">复制到发布页</button></div>
+    <div class="m" style="margin-top:8px">「复制到发布页」会把图片转存到你自己的闲鱼图床，并预填标题 / 描述 / 价格，确认后再发布。请只复制你有权使用的内容。</div>
+    <div id="colOut" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<!-- ========== 敏感词 ========== -->
+<div class="pane" id="pane-sens">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>敏感词过滤</b></div>
+  <div class="card">
+    <label class="row"><span>命中后</span><select class="fld sm" id="s_sensitive_mode" onchange="saveSettings('sens')" style="width:auto"><option value="replace">替换后发送</option><option value="block">拦截不发送</option></select></label>
+    <div style="display:flex;gap:8px"><input class="fld" id="swWord" placeholder="敏感词，如：微信"><input class="fld" id="swRep" placeholder="替换为(默认***)" style="width:40%"></div>
+    <button class="btn full" style="margin-top:8px" onclick="saveSw()">添加</button>
+    <div class="m" style="margin-top:6px">作用于自动回复、AI 回复；发货卡密内容不过滤。</div>
+  </div>
+  <div id="swList"></div>
+</div>
+
+<!-- ========== 通知 ========== -->
+<div class="pane" id="pane-notify">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>通知渠道</b></div>
+  <div class="card">
+    <input type="hidden" id="ncId">
+    <div class="grid2" style="margin-bottom:8px">
+      <select class="fld" id="ncType" onchange="ncTypeChanged()">
+        <option value="wecom">企业微信机器人</option><option value="dingtalk">钉钉机器人</option><option value="feishu">飞书机器人</option>
+        <option value="bark">Bark (iOS)</option><option value="telegram">Telegram Bot</option><option value="webhook">自定义 Webhook</option>
+      </select>
+      <input class="fld" id="ncName" placeholder="备注名">
+    </div>
+    <input class="fld" id="ncUrl" placeholder="Webhook URL" style="margin-bottom:8px">
+    <input class="fld" id="ncSecret" placeholder="加签密钥（钉钉/飞书可选）" style="margin-bottom:8px">
+    <div id="ncTg" style="display:none"><input class="fld" id="ncToken" placeholder="Bot Token" style="margin-bottom:8px"><input class="fld" id="ncChat" placeholder="chat_id" style="margin-bottom:8px"></div>
+    <div id="ncEvents" style="display:flex;flex-wrap:wrap;gap:8px;font-size:12px;margin-bottom:8px"></div>
+    <div class="grid2"><button class="btn" onclick="saveNc()">保存渠道</button><button class="btn gray" onclick="testNc()">发送测试</button></div>
+  </div>
+  <div id="ncList"></div>
+</div>
+
+<!-- ========== 设置 ========== -->
+<div class="pane" id="pane-set">
+  <div class="sub-hd"><button class="ib" onclick="go('more')">‹</button><b>系统设置</b></div>
+  <div class="card">
+    <label class="row"><span>启用 IM 消息中枢</span><input type="checkbox" id="s_im_enabled"></label>
+    <label class="row"><span>所有账号同时在线（关闭则仅当前账号）</span><input type="checkbox" id="s_im_all_accounts"></label>
+    <label class="row"><span>本机系统通知</span><input type="checkbox" id="s_local_notify_enabled"></label>
+    <label class="row"><span>低库存预警阈值（张）</span><input class="fld sm" id="s_low_stock_threshold" type="number"></label>
+    <label class="row"><span>每日自动擦亮时间（HH:mm，空=关闭）</span><input class="fld sm" id="s_auto_polish_time" placeholder="09:00"></label>
+    <button class="btn full" style="margin-top:9px" onclick="saveSettings('set')">保存</button>
+    <div class="m" id="setInfo" style="margin-top:8px"></div>
+  </div>
+  <div class="st"><span class="l">📡 账号 IM 状态</span></div>
+  <div id="imList"></div>
+</div>
+
 </main>
 
 <!-- 底部导航 -->
@@ -328,21 +583,21 @@ textarea.fld{resize:none;font-family:ui-monospace,monospace}
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/></svg>
     <span>发货</span>
   </button>
+  <button class="ni" data-p="msg" onclick="go('msg')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+    <span>消息</span><i class="nbadge" id="msgBadge"></i>
+  </button>
   <button class="ni" data-p="cards" onclick="go('cards')">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
     <span>卡密</span>
   </button>
-  <button class="ni" data-p="rules" onclick="go('rules')">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-    <span>规则</span>
+  <button class="ni" data-p="more" onclick="go('more')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+    <span>功能</span>
   </button>
   <button class="ni" data-p="acc" onclick="go('acc')">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
     <span>账号</span>
-  </button>
-  <button class="ni" data-p="pub" onclick="go('pub')">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
-    <span>上架</span>
   </button>
 </nav>
 
@@ -448,28 +703,46 @@ function go(p){
   var el = document.getElementById('pane-' + p);
   if(el) el.classList.add('on');
 
+  var MAIN = { home:1, msg:1, cards:1, more:1, acc:1 };
+  var navKey = MAIN[p] ? p : (p === 'chat' ? 'msg' : 'more');
   var navs = document.querySelectorAll('.ni');
   for(var j=0;j<navs.length;j++){
-    navs[j].classList.toggle('on', navs[j].getAttribute('data-p') === p);
+    navs[j].classList.toggle('on', navs[j].getAttribute('data-p') === navKey);
   }
   window.scrollTo(0, 0);
+  stopTimers();
+  if(p === 'home'){ loadDashboard(); }
+  if(p === 'msg'){ loadChats(); chatListTimer = setInterval(function(){ loadChats(); }, 8000); }
+  if(p === 'chat'){ $('#msgBox')._init = false; chatTimer = setInterval(function(){ loadMessages(false); }, 4000); }
+  if(p === 'reply'){ loadReply(); }
+  if(p === 'ai'){ loadAi(); }
+  if(p === 'tpl'){ loadTpl(); }
+  if(p === 'orders'){ loadOrderList(); }
+  if(p === 'items'){ loadItemsMgr(1); }
+  if(p === 'sens'){ loadSens(); }
+  if(p === 'notify'){ loadNotify(); }
+  if(p === 'set'){ loadSettings().then(loadImList); }
 
   if(p === 'home'){ loadDaemon(); loadStats(); loadOrders(); loadLogs(); }
   if(p === 'cards'){ loadCards(); loadStock(); }
-  if(p === 'rules'){ loadRules(); }
+  if(p === 'rules'){ loadTpl(); loadRules(); }
   if(p === 'acc'){ loadAccounts(); }
   if(p === 'pub'){ loadPublishedItems(); }
 }
 
 function refreshAll(){
   toast('正在刷新…', 900);
-  loadDaemon(); loadStats(); loadOrders(); loadLogs(); loadAccounts();
+  loadDaemon(); loadStats(); loadOrders(); loadLogs(); loadAccounts(); loadDashboard();
   var cur = document.querySelector('.pane.on');
   if(cur){
     var id = cur.id;
     if(id === 'pane-cards'){ loadCards(); loadStock(); }
     if(id === 'pane-rules'){ loadRules(); }
     if(id === 'pane-pub'){ loadPublishedItems(); }
+    if(id === 'pane-msg'){ loadChats(true); }
+    if(id === 'pane-chat'){ loadMessages(false); }
+    if(id === 'pane-orders'){ loadOrderList(); }
+    if(id === 'pane-items'){ loadItemsMgr(1); }
   }
 }
 
@@ -537,7 +810,7 @@ function loadOrders(){
         '</div>' +
         '<button class="btn full" onclick="shipNow(this,' + esc(JSON.stringify(String(o.orderId||''))) + ',' +
            esc(JSON.stringify(String(o.title||''))) + ',' + esc(JSON.stringify(String(o.sku||''))) + ',' +
-           (parseInt(o.quantity, 10) || 1) + ')">立即发货</button>' +
+           (parseInt(o.quantity, 10) || 1) + ',' + esc(JSON.stringify({buyerId: String(o.buyerId||''), buyer: String(o.buyer||''), itemId: String(o.itemId||'')})) + ')">立即发货</button>' +
       '</div>';
     }
     box.innerHTML = html;
@@ -547,15 +820,16 @@ function loadOrders(){
   });
 }
 
-function shipNow(btn, orderId, title, sku, qty){
+function shipNow(btn, orderId, title, sku, qty, ext){
+  ext = ext || {};
   btn.disabled = true;
   btn.textContent = '发货中…';
   api('/api/delivery/ship_now', {
     method:'POST',
-    body:{ orderId: orderId, title: title, sku: sku, quantity: qty }
+    body:{ orderId: orderId, title: title, sku: sku, quantity: qty, buyerId: ext.buyerId || '', buyer: ext.buyer || '', itemId: ext.itemId || '' }
   }).then(function(d){
     if(d.ok || d.success){
-      toast('发货成功，已发放 ' + (d.cardsDelivered || 0) + ' 张卡密');
+      toast(d.duplicated ? d.message : ('发货成功，已发放 ' + (d.cardsDelivered || 0) + ' 张卡密'));
     } else {
       toast('发货失败: ' + (d.message || '未知错误'));
     }
@@ -678,7 +952,10 @@ function loadRules(){
             '<div style="font-size:13px;font-weight:600">' + esc(r.keyword) +
               (r.sku ? ' <span class="chip">' + esc(r.sku) + '</span>' : '') +
               ' <span class="chip ' + (r.use_pool == 1 ? 'ok' : '') + '">' +
-              (r.use_pool == 1 ? '卡密池' : '仅固定') + '</span></div>' +
+              (r.use_pool == 1 ? '卡密池' : '仅固定') + '</span>' +
+              (r.delay_minutes > 0 ? ' <span class="chip warn">延时' + r.delay_minutes + '分</span>' : '') +
+              (r.template_id > 0 ? ' <span class="chip">模板</span>' : '') +
+              (r.send_im == 1 ? ' <span class="chip ok">私信</span>' : '') + '</div>' +
             (r.fixed_content ? '<div style="font-size:11px;color:var(--sub);margin-top:4px;word-break:break-all">附言：' +
               esc(String(r.fixed_content).slice(0, 60)) + '</div>' : '') +
           '</div>' +
@@ -701,12 +978,15 @@ function saveRule(){
       sku: $('#rSku').value.trim(),
       fixed_content: $('#rFixed').value.trim(),
       trade_text: $('#rTrade').value.trim() || '虚拟商品已自动交付，请查收~',
-      use_pool: $('#rUsePool').checked ? 1 : 0
+      use_pool: $('#rUsePool').checked ? 1 : 0,
+      delay_minutes: parseInt($('#rDelay').value, 10) || 0,
+      template_id: parseInt($('#rTpl').value, 10) || 0,
+      send_im: $('#rSendIm').checked ? 1 : 0
     }
   }).then(function(){
     toast('规则已保存');
     $('#rKeyword').value = ''; $('#rSku').value = '';
-    $('#rFixed').value = ''; $('#rTrade').value = '';
+    $('#rFixed').value = ''; $('#rTrade').value = ''; $('#rDelay').value = '';
     loadRules(); loadStats();
   }).catch(function(e){ toast('保存失败: ' + e.message); });
 }
@@ -1133,6 +1413,462 @@ function loadPublishedItems(page){
   }).then(function(){ onSaleLoading = false; });
 }
 
+/* ================= v1.5.0 消息中枢 / 运营功能 ================= */
+var curAcc = '';
+var curChat = null;   // {chat_id, buyer_id, buyer_nick, item_id, paused}
+var chatTimer = null, chatListTimer = null;
+var SETTINGS = {};
+var EVENTS = [];
+
+function fmtDT(ts){
+  if(!ts) return '';
+  var d = new Date(ts > 1e12 ? ts : ts * 1000);
+  if(isNaN(d.getTime())) return '';
+  var now = new Date();
+  var hm = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  if(d.toDateString() === now.toDateString()) return hm;
+  return (d.getMonth()+1) + '-' + d.getDate() + ' ' + hm;
+}
+function imLabel(s){
+  return ({CONNECTED:'🟢 在线', CONNECTING:'🟡 连接中', RECONNECTING:'🟡 重连中', FAILED:'🔴 失败', STOPPED:'⚪ 未启动'})[s] || s || '⚪ 未启动';
+}
+function stopTimers(){
+  if(chatTimer){ clearInterval(chatTimer); chatTimer = null; }
+  if(chatListTimer){ clearInterval(chatListTimer); chatListTimer = null; }
+}
+function qacc(){ return curAcc ? ('account=' + encodeURIComponent(curAcc)) : ''; }
+
+/* ---------- 首页看板 ---------- */
+function loadDashboard(){
+  api('/api/dashboard').then(function(d){
+    $('#dMsg').textContent = d.todayMessages || 0;
+    $('#dOrd').textContent = d.todayOrders || 0;
+    $('#dDel').textContent = d.todayDelivered || 0;
+    $('#dRev').textContent = '¥' + (d.todayRevenue || '0.00');
+    var im = d.im || {}, parts = [];
+    for(var k in im){ parts.push(imLabel(im[k].state)); }
+    var tips = [];
+    tips.push('IM：' + (parts.length ? parts.join(' ') : '未启动'));
+    if(d.unread) tips.push('未读 ' + d.unread);
+    if(d.pendingTasks) tips.push('待发货任务 ' + d.pendingTasks);
+    if(d.failedTasks) tips.push('<span style="color:var(--err)">发货失败 ' + d.failedTasks + '</span>');
+    var low = d.lowStock || [];
+    for(var i=0;i<low.length;i++) tips.push('<span style="color:var(--warn)">⚠ ' + esc(low[i].keyword) + (low[i].sku ? '/' + esc(low[i].sku) : '') + ' 剩 ' + low[i].left + '</span>');
+    $('#dTips').innerHTML = tips.join(' · ');
+    setBadge(d.unread || 0);
+  }).catch(function(){});
+}
+function setBadge(n){
+  var b = $('#msgBadge'); if(!b) return;
+  b.textContent = n > 99 ? '99+' : n; b.style.display = n > 0 ? 'block' : 'none';
+}
+
+/* ---------- 账号下拉 ---------- */
+function fillAccountSelect(sel, withAll){
+  return api('/api/im/status').then(function(d){
+    var list = d.accounts || [], html = withAll ? '<option value="">全部账号</option>' : '';
+    for(var i=0;i<list.length;i++){
+      var a = list[i];
+      if(!curAcc && a.isActive) curAcc = a.userId;
+      html += '<option value="' + esc(a.userId) + '">' + esc(a.nick || a.userId) + ' · ' + imLabel(a.im) + (a.unread ? ' (' + a.unread + ')' : '') + '</option>';
+    }
+    if(!list.length) html = '<option value="">尚未登录账号</option>';
+    sel.innerHTML = html;
+    if(!withAll) sel.value = curAcc;
+    return d;
+  });
+}
+
+/* ---------- 会话列表 ---------- */
+function loadChats(refresh){
+  var box = $('#chatList');
+  fillAccountSelect($('#msgAcc'), false).then(function(){
+    var q = '/api/chats?' + qacc() + (refresh ? '&refresh=1' : '') + '&q=' + encodeURIComponent($('#chatSearch').value || '');
+    return api(q);
+  }).then(function(d){
+    $('#imState').textContent = imLabel(d.im);
+    setBadge(d.unread || 0);
+    var list = d.chats || [];
+    if(!list.length){ box.innerHTML = '<div class="empty">暂无会话<br><span style="font-size:11px">IM 在线后买家消息会实时出现；也可点「同步会话」</span></div>'; return; }
+    var html = '';
+    for(var i=0;i<list.length;i++){
+      var c = list[i];
+      html += '<div class="conv" onclick="openChat(' + esc(JSON.stringify(c.chat_id)) + ')">' +
+        (c.buyer_avatar ? '<img class="cav" src="' + esc(c.buyer_avatar) + '" onerror="this.style.visibility=\'hidden\'">' : '<div class="cav"></div>') +
+        '<div class="ai"><div class="n">' + esc(c.buyer_nick || c.buyer_id || '买家') +
+          (c.paused ? ' <span class="bg warn">人工</span>' : '') +
+          '<span class="t">' + fmtDT(c.last_ts) + '</span></div>' +
+          '<div class="m" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.last_msg || '') + '</div>' +
+          (c.item_title || c.item_id ? '<div class="m" style="color:#9aa0ab">🛍 ' + esc(c.item_title || c.item_id) + '</div>' : '') +
+        '</div>' + (c.unread ? '<span class="ub">' + c.unread + '</span>' : '') + '</div>';
+    }
+    box.innerHTML = html;
+  }).catch(function(e){ box.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>'; });
+}
+
+/* ---------- 聊天 ---------- */
+function openChat(chatId){
+  curChat = { chat_id: chatId };
+  go('chat');
+  $('#msgBox').innerHTML = '<div class="empty">加载中…</div>';
+  loadMessages(false);
+}
+function loadMessages(sync){
+  if(!curChat) return;
+  var box = $('#msgBox');
+  var atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+  api('/api/chat/messages?' + qacc() + '&chatId=' + encodeURIComponent(curChat.chat_id) + (sync ? '&sync=1' : '')).then(function(d){
+    var c = d.conversation || {};
+    curChat.buyer_id = c.buyer_id; curChat.paused = !!c.paused;
+    $('#chatTitle').textContent = c.buyer_nick || c.buyer_id || '买家';
+    $('#chatSub').textContent = (c.item_id ? '商品 ' + c.item_id : '') + (c.paused ? ' · 人工接管中' : ' · 自动回复中');
+    $('#chatPauseBtn').textContent = c.paused ? '恢复自动' : '人工接管';
+    if(sync){ toast(d.synced >= 0 ? ('已同步 ' + d.synced + ' 条历史') : 'IM 未连接，无法拉取历史'); }
+    var list = d.messages || [], html = '';
+    var KIND = {1:'自动回复', 2:'发货', 3:'系统'};
+    for(var i=0;i<list.length;i++){
+      var m = list[i], out = m.direction === 'out';
+      if(m.kind == 3){ html += '<div class="sys">' + esc(m.content) + ' · ' + fmtDT(m.ts) + '</div>'; continue; }
+      html += '<div class="bub ' + (out ? 'out' : 'in') + '"><div class="bt">' + esc(m.content) + '</div>' +
+        '<div class="bm">' + fmtDT(m.ts) + (KIND[m.kind] ? ' · ' + KIND[m.kind] : '') + (m.intent && !out ? ' · ' + esc(m.intent) : '') + '</div></div>';
+    }
+    box.innerHTML = html || '<div class="empty">暂无消息，可点「历史」从闲鱼拉取</div>';
+    if(atBottom || sync || !box._init){ box.scrollTop = box.scrollHeight; box._init = true; }
+  }).catch(function(e){ box.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>'; });
+}
+function sendChat(){
+  var t = $('#chatText').value.trim();
+  if(!t || !curChat) return;
+  api('/api/chat/send', { body: { account: curAcc, chatId: curChat.chat_id, text: t } }).then(function(){
+    $('#chatText').value = ''; loadMessages(false);
+  }).catch(function(e){ toast('发送失败：' + e.message); });
+}
+function togglePause(){
+  if(!curChat) return;
+  var mins = curChat.paused ? 0 : (parseInt(SETTINGS.manual_pause_minutes, 10) || 30);
+  api('/api/chat/pause', { body: { account: curAcc, chatId: curChat.chat_id, minutes: mins } }).then(function(){
+    toast(mins ? ('已人工接管 ' + mins + ' 分钟') : '已恢复自动回复'); loadMessages(false);
+  }).catch(function(e){ toast(e.message); });
+}
+
+/* ---------- 设置（白名单） ---------- */
+function loadSettings(){
+  return api('/api/settings').then(function(d){
+    SETTINGS = d.settings || {};
+    for(var k in SETTINGS){
+      var el = document.getElementById('s_' + k);
+      if(!el) continue;
+      if(el.type === 'checkbox') el.checked = SETTINGS[k] === 'true'; else el.value = SETTINGS[k];
+    }
+  }).catch(function(){});
+}
+function saveSettings(scope){
+  var els = document.querySelectorAll('#pane-' + scope + ' [id^="s_"]'), o = {};
+  for(var i=0;i<els.length;i++){
+    var el = els[i], k = el.id.slice(2);
+    o[k] = el.type === 'checkbox' ? String(el.checked) : el.value.trim();
+  }
+  api('/api/settings', { body: { settings: o } }).then(function(){ toast('已保存'); loadSettings(); if(scope === 'set') loadImList(); })
+    .catch(function(e){ toast('保存失败：' + e.message); });
+}
+function loadImList(){
+  api('/api/im/status').then(function(d){
+    var list = d.accounts || [], html = '';
+    for(var i=0;i<list.length;i++){
+      var a = list[i];
+      html += '<div class="acc"><div class="ai"><div class="n">' + esc(a.nick || a.userId) + (a.isActive ? ' <span class="bg">当前</span>' : '') +
+        (a.status === 'EXPIRED' ? ' <span class="bg err">已失效</span>' : '') + '</div><div class="m">' + imLabel(a.im) + ' ' + esc(a.detail || '') + '</div></div></div>';
+    }
+    $('#imList').innerHTML = html || '<div class="empty">暂无账号</div>';
+    $('#setInfo').textContent = SETTINGS.auto_polish_time ? ('每日 ' + SETTINGS.auto_polish_time + ' 自动擦亮') : '';
+  });
+  api('/api/dashboard').then(function(d){ if(d.autoPolish) $('#setInfo').textContent += ' · 上次：' + d.autoPolish; }).catch(function(){});
+}
+
+/* ---------- 通用列表渲染 ---------- */
+function rowCard(main, sub, actions){
+  return '<div class="ord" style="padding:10px 11px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">' +
+    '<div style="min-width:0;flex:1"><div style="font-size:13px;font-weight:600;word-break:break-all">' + main + '</div>' +
+    (sub ? '<div style="font-size:11px;color:var(--sub);margin-top:4px;word-break:break-all;white-space:pre-wrap">' + sub + '</div>' : '') +
+    '</div><div style="display:flex;gap:5px;flex:none">' + actions + '</div></div></div>';
+}
+function delRow(path, id, after){
+  if(!confirm('确定删除？')) return;
+  api(path + '?id=' + id, { method: 'DELETE' }).then(function(){ toast('已删除'); after(); }).catch(function(e){ toast(e.message); });
+}
+
+/* ---------- 关键词 / 商品回复 ---------- */
+var KW = [];
+function loadReply(){
+  loadSettings();
+  fillAccountSelect($('#kwAcc'), true);
+  api('/api/reply/keywords').then(function(d){
+    KW = d.list || [];
+    $('#kwCnt').textContent = KW.length + ' 条';
+    var html = '';
+    for(var i=0;i<KW.length;i++){
+      var r = KW[i];
+      html += rowCard(esc(r.keyword) + ' <span class="chip">' + (r.match_type === 'exact' ? '精确' : '包含') + '</span>' +
+          (r.item_id ? ' <span class="chip">商品 ' + esc(r.item_id) + '</span>' : '') + (r.account_id ? ' <span class="chip">指定账号</span>' : '') +
+          (r.enabled == 1 ? '' : ' <span class="chip err">停用</span>'),
+        esc(r.reply),
+        '<button class="btn sm gray" onclick="editKw(' + i + ')">编辑</button><button class="btn sm gray" onclick="delRow(\'/api/reply/keywords\',' + r.id + ',loadReply)">删</button>');
+    }
+    $('#kwList').innerHTML = html || '<div class="empty">暂无关键词</div>';
+  });
+  api('/api/reply/items').then(function(d){
+    var list = d.list || [], html = '';
+    for(var i=0;i<list.length;i++){
+      var r = list[i];
+      html += rowCard('商品 ' + esc(r.item_id) + (r.floor_price ? ' <span class="chip warn">底价 ¥' + esc(r.floor_price) + '</span>' : ''),
+        esc(r.reply || '（交给 AI）'), '<button class="btn sm gray" onclick="delRow(\'/api/reply/items\',' + r.id + ',loadReply)">删</button>');
+    }
+    $('#irList').innerHTML = html;
+  });
+}
+function editKw(i){
+  var r = KW[i];
+  $('#kwId').value = r.id; $('#kwKey').value = r.keyword; $('#kwReply').value = r.reply;
+  $('#kwMatch').value = r.match_type; $('#kwItem').value = r.item_id; $('#kwAcc').value = r.account_id; $('#kwPri').value = r.priority;
+  window.scrollTo(0, 0);
+}
+function saveKw(){
+  var b = { id: parseInt($('#kwId').value, 10) || 0, keyword: $('#kwKey').value.trim(), reply: $('#kwReply').value.trim(),
+    match_type: $('#kwMatch').value, item_id: $('#kwItem').value.trim(), account_id: $('#kwAcc').value,
+    priority: parseInt($('#kwPri').value, 10) || 0, enabled: 1 };
+  if(!b.keyword || !b.reply){ toast('请填写关键词与回复'); return; }
+  api('/api/reply/keywords', { body: b }).then(function(){
+    toast('已保存'); ['kwId','kwKey','kwReply','kwItem','kwPri'].forEach(function(id){ $('#' + id).value = ''; }); loadReply();
+  }).catch(function(e){ toast(e.message); });
+}
+function saveIr(){
+  var b = { item_id: $('#irItem').value.trim(), reply: $('#irReply').value.trim(), floor_price: $('#irFloor').value.trim(), enabled: 1, account_id: '' };
+  if(!b.item_id){ toast('请填写商品ID'); return; }
+  api('/api/reply/items', { body: b }).then(function(){ toast('已保存'); $('#irItem').value = ''; $('#irReply').value = ''; $('#irFloor').value = ''; loadReply(); })
+    .catch(function(e){ toast(e.message); });
+}
+function testReply(){
+  var t = $('#trText').value.trim(); if(!t) return;
+  $('#trOut').textContent = '思考中…';
+  api('/api/chat/test_reply', { body: { account: curAcc, text: t, itemId: $('#trItem').value.trim() } }).then(function(d){
+    $('#trOut').textContent = (d.blocked ? '⛔ 命中敏感词被拦截' : (d.reply || '（无回复）')) + '\n来源：' + d.source + ' · 意图：' + d.intent;
+  }).catch(function(e){ $('#trOut').textContent = e.message; });
+}
+
+/* ---------- AI ---------- */
+function loadAi(){
+  api('/api/ai/config').then(function(d){
+    var c = d.config || {};
+    ['ai_provider','ai_base_url','ai_model','ai_max_discount_percent','ai_max_discount_amount','ai_max_bargain_rounds','ai_temperature']
+      .forEach(function(k){ $('#' + k).value = c[k] || ''; });
+    $('#ai_enabled').checked = c.ai_enabled === 'true';
+    $('#ai_api_key').value = '';
+    $('#aiKeyMask').textContent = c.ai_api_key_set ? ('已保存 ' + c.ai_api_key_mask) : '未设置';
+  });
+  api('/api/prompts').then(function(d){
+    var p = d.prompts || {};
+    ['default','price','tech'].forEach(function(k){ $('#pr_' + k).value = p[k] || ''; });
+  });
+}
+function saveAi(){
+  var c = { ai_enabled: String($('#ai_enabled').checked) };
+  ['ai_provider','ai_base_url','ai_model','ai_max_discount_percent','ai_max_discount_amount','ai_max_bargain_rounds','ai_temperature','ai_api_key']
+    .forEach(function(k){ c[k] = $('#' + k).value.trim(); });
+  api('/api/ai/config', { body: { config: c } }).then(function(){ toast('已保存'); loadAi(); }).catch(function(e){ toast(e.message); });
+}
+function testAi(){
+  $('#aiOut').textContent = '请求中…';
+  api('/api/ai/test', { body: { text: '在吗？能便宜点吗' } }).then(function(d){ $('#aiOut').textContent = '✅ ' + d.reply; })
+    .catch(function(e){ $('#aiOut').textContent = '❌ ' + e.message; });
+}
+function savePrompts(){
+  api('/api/prompts', { body: { prompts: { default: $('#pr_default').value, price: $('#pr_price').value, tech: $('#pr_tech').value } } })
+    .then(function(){ toast('提示词已保存'); loadAi(); }).catch(function(e){ toast(e.message); });
+}
+
+/* ---------- 模板 ---------- */
+var TPL = [];
+function loadTpl(cb){
+  return api('/api/templates').then(function(d){
+    TPL = d.list || [];
+    var html = '';
+    for(var i=0;i<TPL.length;i++){
+      var t = TPL[i];
+      html += rowCard(esc(t.name), esc(t.content), '<button class="btn sm gray" onclick="editTpl(' + i + ')">编辑</button><button class="btn sm gray" onclick="delRow(\'/api/templates\',' + t.id + ',loadTpl)">删</button>');
+    }
+    var box = $('#tplList'); if(box) box.innerHTML = html || '<div class="empty">暂无模板，未绑定模板的规则使用默认格式</div>';
+    var sel = $('#rTpl');
+    if(sel){
+      var o = '<option value="0">默认格式（卡密 + 附言）</option>';
+      for(var j=0;j<TPL.length;j++) o += '<option value="' + TPL[j].id + '">' + esc(TPL[j].name) + '</option>';
+      var v = sel.value; sel.innerHTML = o; sel.value = v || '0';
+    }
+    if(cb) cb();
+  }).catch(function(){});
+}
+function editTpl(i){ var t = TPL[i]; $('#tplId').value = t.id; $('#tplName').value = t.name; $('#tplContent').value = t.content; window.scrollTo(0,0); }
+function saveTpl(){
+  var b = { id: parseInt($('#tplId').value, 10) || 0, name: $('#tplName').value.trim(), content: $('#tplContent').value };
+  if(!b.name || !b.content.trim()){ toast('请填写名称与内容'); return; }
+  api('/api/templates', { body: b }).then(function(){ toast('已保存'); $('#tplId').value=''; $('#tplName').value=''; $('#tplContent').value=''; loadTpl(); })
+    .catch(function(e){ toast(e.message); });
+}
+
+/* ---------- 订单 ---------- */
+function loadOrderList(){
+  var box = $('#ordAll');
+  api('/api/orders/list?status=' + encodeURIComponent($('#ordFilter').value)).then(function(d){
+    var list = d.orders || [], html = '';
+    for(var i=0;i<list.length;i++){
+      var o = list[i];
+      var st = o.status || '-', cls = st.indexOf('已发货') >= 0 ? 'ok' : (st.indexOf('失败') >= 0 || st.indexOf('关闭') >= 0 ? 'err' : 'warn');
+      var task = o.task_status ? ('任务：' + o.task_status + (o.task_error ? '（' + o.task_error + '）' : '')) : '';
+      html += '<div class="ord"><div class="ot"><span class="oid">' + esc(o.order_id) + '</span><span class="chip ' + cls + '">' + esc(st) + '</span></div>' +
+        '<div class="od"><span>商品：<b>' + esc(o.title || o.item_id || '-') + '</b></span><span>买家：<b>' + esc(o.buyer_nick || o.buyer_id || '-') + '</b></span>' +
+        (o.price ? '<span>金额：<b>¥' + esc(o.price) + '</b></span>' : '') + '<span>来源：' + esc(o.source) + '</span><span>' + fmtDT(o.created_at) + '</span></div>' +
+        (task ? '<div class="m" style="margin-bottom:8px">' + esc(task) + '</div>' : '') +
+        '<div class="grid2"><button class="btn sm gray" onclick="orderDetail(' + esc(JSON.stringify(o.order_id)) + ')">详情/刷新状态</button>' +
+        '<button class="btn sm" onclick="retryOrder(this,' + esc(JSON.stringify(o.order_id)) + ')">' + (st === '已发货' ? '重发检查' : '立即发货') + '</button></div></div>';
+    }
+    box.innerHTML = html || '<div class="empty">暂无订单记录<br><span style="font-size:11px">IM 付款消息与订单轮询发现的订单会记录在这里</span></div>';
+  }).catch(function(e){ box.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>'; });
+}
+function orderDetail(id){
+  toast('查询中…');
+  api('/api/orders/detail?orderId=' + encodeURIComponent(id)).then(function(d){
+    var lines = ['订单 ' + id];
+    if(d.remoteStatus) lines.push('闲鱼状态：' + d.remoteStatus);
+    if(d.remoteError) lines.push('闲鱼接口：' + d.remoteError);
+    if(d.task) lines.push('发货任务：' + d.task.status + ' ' + (d.task.last_error || ''));
+    (d.logs || []).forEach(function(l){ lines.push(fmtDT(l.created_at) + ' ' + l.status); });
+    alert(lines.join('\n'));
+    loadOrderList();
+  }).catch(function(e){ toast(e.message); });
+}
+function retryOrder(btn, id){
+  btn.disabled = true;
+  api('/api/orders/retry', { body: { orderId: id } }).then(function(d){ toast(d.message || '完成'); loadOrderList(); })
+    .catch(function(e){ toast(e.message); btn.disabled = false; });
+}
+
+/* ---------- 商品管理 ---------- */
+function loadItemsMgr(page){
+  page = page || 1;
+  var box = $('#itemList');
+  if(page === 1) box.innerHTML = '<div class="empty">正在获取商品…</div>';
+  api('/api/items/on_sale?page=' + page).then(function(d){
+    var list = d.items || [], html = '';
+    for(var i=0;i<list.length;i++){
+      var it = list[i], id = esc(JSON.stringify(String(it.id)));
+      html += '<div class="pub-item">' + (it.imageUrl ? '<img class="pic" src="' + esc(it.imageUrl) + '" onerror="this.style.visibility=\'hidden\'">' : '<div class="pic"></div>') +
+        '<div class="info"><div class="title">' + esc(it.title || '-') + '</div>' +
+        '<div class="meta"><span class="price">¥ ' + esc(it.price || '0') + '</span><span class="chip ' + (it.onSale === false ? 'err' : 'ok') + '">' + esc(it.status || '在售') + '</span></div>' +
+        '<div class="acts"><button class="btn sm gray" onclick="itemAct(this,\'polish\',' + id + ')">擦亮</button>' +
+        '<button class="btn sm gray" onclick="itemPrice(' + id + ',' + esc(JSON.stringify(String(it.price || ''))) + ')">改价</button>' +
+        (it.onSale === false ? '<button class="btn sm gray" onclick="itemAct(this,\'reshelf\',' + id + ')">上架</button>'
+                             : '<button class="btn sm gray" onclick="if(confirm(\'确定下架？\'))itemAct(this,\'downshelf\',' + id + ')">下架</button>') +
+        '<button class="btn sm gray" onclick="go(\'reply\');$(\'#irItem\').value=' + id + ';$(\'#trItem\').value=' + id + '">回复</button></div></div></div>';
+    }
+    if(page === 1) box.innerHTML = html || '<div class="empty">暂无商品</div>'; else box.insertAdjacentHTML('beforeend', html);
+    if(list.length >= 20) box.insertAdjacentHTML('beforeend', '<button class="btn sm gray full" onclick="this.remove();loadItemsMgr(' + (page + 1) + ')">加载更多</button>');
+  }).catch(function(e){ if(page === 1) box.innerHTML = '<div class="empty">获取失败：' + esc(e.message) + '</div>'; });
+}
+function itemAct(btn, act, id){
+  btn.disabled = true;
+  api('/api/items/' + act, { body: { itemId: id } }).then(function(d){ toast(d.message || '成功'); if(act !== 'polish') loadItemsMgr(1); })
+    .catch(function(e){ toast('失败：' + e.message); }).then(function(){ btn.disabled = false; });
+}
+function itemPrice(id, cur){
+  var p = prompt('新价格（元）', cur || ''); if(p == null) return;
+  var v = parseFloat(p); if(!(v > 0)){ toast('价格无效'); return; }
+  api('/api/items/price', { body: { itemId: id, price: v } }).then(function(d){ toast(d.message); loadItemsMgr(1); }).catch(function(e){ toast('改价失败：' + e.message); });
+}
+function polishAll(btn){
+  if(!confirm('对所有在售商品执行擦亮？')) return;
+  btn.disabled = true; toast('擦亮中，请稍候…', 4000);
+  api('/api/items/polish_all', { body: {} }).then(function(d){ toast(d.message); }).catch(function(e){ toast(e.message); })
+    .then(function(){ btn.disabled = false; });
+}
+
+/* ---------- 采集 ---------- */
+function collect(relist){
+  var u = $('#colUrl').value.trim(); if(!u){ toast('请粘贴链接'); return; }
+  var out = $('#colOut'); out.innerHTML = '<div class="empty">' + (relist ? '正在解析并转存图片…' : '解析中…') + '</div>';
+  api(relist ? '/api/collect/relist' : '/api/collect/parse', { body: { url: u } }).then(function(d){
+    var imgs = (relist ? d.images : (d.sourceImages || []).map(function(x){ return { url: x }; })) || [];
+    var html = '<div style="font-weight:700;margin-bottom:6px">' + esc(d.title) + '</div><div class="price" style="color:var(--brand);font-weight:700">¥ ' + esc(d.price) + '</div>' +
+      '<div class="m" style="white-space:pre-wrap;margin:6px 0">' + esc((d.desc || '').slice(0, 300)) + '</div><div class="img-grid">';
+    for(var i=0;i<imgs.length;i++) html += '<div class="img-box"><img src="' + esc(imgs[i].url) + '"></div>';
+    out.innerHTML = html + '</div>' + (d.warning ? '<div class="m" style="color:var(--warn)">' + esc(d.warning) + '</div>' : '');
+    if(relist){
+      uploadedImages = (d.images || []).slice(0, 9);
+      $('#pTitle').value = d.title || ''; $('#pDesc').value = d.desc || ''; $('#pPrice').value = d.price || '';
+      renderUploadGrid();
+      toast('已预填到发布页，请检查后发布');
+      setTimeout(function(){ go('pub'); }, 600);
+    }
+  }).catch(function(e){ out.innerHTML = '<div class="empty">失败：' + esc(e.message) + '</div>'; });
+}
+
+/* ---------- 敏感词 ---------- */
+function loadSens(){
+  loadSettings();
+  api('/api/sensitive').then(function(d){
+    var list = d.list || [], html = '';
+    for(var i=0;i<list.length;i++) html += '<span class="chip" style="font-size:12px;padding:5px 10px;margin:0 6px 6px 0;display:inline-block">' + esc(list[i].word) +
+      (list[i].replacement ? ' → ' + esc(list[i].replacement) : '') + ' <a onclick="delRow(\'/api/sensitive\',' + list[i].id + ',loadSens)" style="color:var(--err);margin-left:4px">×</a></span>';
+    $('#swList').innerHTML = '<div class="card">' + (html || '<div class="empty">暂无敏感词</div>') + '</div>';
+  });
+}
+function saveSw(){
+  var w = $('#swWord').value.trim(); if(!w) return;
+  api('/api/sensitive', { body: { word: w, replacement: $('#swRep').value.trim() } }).then(function(){ $('#swWord').value=''; $('#swRep').value=''; loadSens(); })
+    .catch(function(e){ toast(e.message); });
+}
+
+/* ---------- 通知 ---------- */
+var NC = [];
+function ncTypeChanged(){
+  var t = $('#ncType').value;
+  $('#ncTg').style.display = t === 'telegram' ? 'block' : 'none';
+  $('#ncUrl').style.display = t === 'telegram' ? 'none' : 'block';
+  $('#ncSecret').style.display = (t === 'dingtalk' || t === 'feishu') ? 'block' : 'none';
+  $('#ncUrl').placeholder = t === 'bark' ? 'https://api.day.app/你的Key' : 'Webhook URL';
+}
+function ncBody(){
+  var t = $('#ncType').value, cfg = {};
+  if(t === 'telegram'){ cfg.token = $('#ncToken').value.trim(); cfg.chat_id = $('#ncChat').value.trim(); }
+  else { cfg.url = $('#ncUrl').value.trim(); if($('#ncSecret').value.trim()) cfg.secret = $('#ncSecret').value.trim(); }
+  var ev = [], cbs = document.querySelectorAll('#ncEvents input:checked');
+  for(var i=0;i<cbs.length;i++) ev.push(cbs[i].value);
+  return { id: parseInt($('#ncId').value, 10) || 0, type: t, name: $('#ncName').value.trim(), config: cfg, events: ev, enabled: 1 };
+}
+function loadNotify(){
+  ncTypeChanged();
+  api('/api/notify/channels').then(function(d){
+    NC = d.list || []; EVENTS = d.events || [];
+    if(!$('#ncEvents').innerHTML){
+      $('#ncEvents').innerHTML = EVENTS.map(function(e){ return '<label><input type="checkbox" value="' + esc(e.key) + '" checked> ' + esc(e.label) + '</label>'; }).join('');
+    }
+    var html = '';
+    for(var i=0;i<NC.length;i++){
+      var c = NC[i], labels = (c.events || '').split(',').filter(Boolean).map(function(k){ var e = EVENTS.filter(function(x){ return x.key === k; })[0]; return e ? e.label : k; });
+      html += rowCard(esc(c.name || c.type) + ' <span class="chip">' + esc(c.type) + '</span>' + (c.enabled == 1 ? '' : ' <span class="chip err">停用</span>'),
+        esc(labels.join('、') || '全部事件'),
+        '<button class="btn sm gray" onclick="testNcId(' + c.id + ')">测</button><button class="btn sm gray" onclick="delRow(\'/api/notify/channels\',' + c.id + ',loadNotify)">删</button>');
+    }
+    $('#ncList').innerHTML = html || '<div class="empty">暂无渠道</div>';
+  });
+}
+function saveNc(){
+  var b = ncBody();
+  if(b.type === 'telegram' ? !(b.config.token && b.config.chat_id) : !b.config.url){ toast('请填写完整配置'); return; }
+  api('/api/notify/channels', { body: b }).then(function(){ toast('已保存'); $('#ncUrl').value=''; $('#ncSecret').value=''; $('#ncToken').value=''; $('#ncName').value=''; loadNotify(); })
+    .catch(function(e){ toast(e.message); });
+}
+function testNc(){ api('/api/notify/test', { body: ncBody() }).then(function(d){ toast('✅ ' + d.message); }).catch(function(e){ toast('❌ ' + e.message); }); }
+function testNcId(id){ api('/api/notify/test', { body: { id: id } }).then(function(d){ toast('✅ ' + d.message); }).catch(function(e){ toast('❌ ' + e.message); }); }
+
 /* ================= 启动 ================= */
 /**
  * 兼容层：Kotlin 侧（以及潜在的外部调用）会调用 window.refreshAccounts()，
@@ -1156,6 +1892,8 @@ function boot(){
   loadOrders();
   loadLogs();
   loadAccounts();
+  loadDashboard();
+  loadSettings();
   setInterval(function(){
     try {
       var cur = document.querySelector('.pane.on');
@@ -1163,6 +1901,7 @@ function boot(){
         loadStats();
         loadLogs();
         loadDaemon();
+        loadDashboard();
       }
     } catch(e){}
   }, 20000);
