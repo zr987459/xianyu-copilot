@@ -78,7 +78,11 @@ class DaemonService : Service() {
         ensureLocalServer()
         // 扫码登录需要 ApplicationContext 才能落库
         QrLoginService.init(applicationContext)
+        // v1.5.0：消息中枢（IM 长连接）与发货任务循环
+        ImManager.init(applicationContext)
+        runCatching { ImManager.sync(applicationContext) }
         startLoop()
+        startTaskLoop()
         return START_STICKY
     }
 
@@ -161,6 +165,10 @@ class DaemonService : Service() {
         if (!cookieAlerted) {
             cookieAlerted = true
             updateNotification("⚠️ 账号已失效，请打开 App 重新登录")
+            val nick = db.getActiveAccount()?.nick.orEmpty()
+            Notifier.notify(applicationContext, Notifier.Event.ACCOUNT_EXPIRED, "账号已失效",
+                "账号 ${nick.ifBlank { unb }} 登录态失效，自动发货已停止，请打开 App 重新登录",
+                dedupeKey = unb, throttleMs = 3600_000L)
             Log.w(TAG, "active account $unb invalid: $detail")
         }
     }
@@ -257,52 +265,75 @@ class DaemonService : Service() {
 
         notifyIfCookieBroken(db)
 
-        if (orders.isEmpty()) return@withLock
-
-        var handled = 0
+        // v1.5.0：订单交给统一发货引擎（与 IM 付款消息共用幂等任务表，绝不重复发货）
         for (order in orders) {
             runCatching {
-                // 幂等：已经发过货的订单直接跳过，绝不重复发货
                 if (db.hasOrderDelivered(order.orderId)) return@runCatching
-
-                val rule = db.matchRule(order.title, order.sku) ?: return@runCatching
-                val cards = if (rule.usePool) {
-                    db.claimCardsAtomic(rule.keyword, rule.sku, order.orderId, order.quantity)
-                } else emptyList()
-
-                val content = buildString {
-                    if (cards.isNotEmpty()) {
-                        append("🎫 自动发货卡密 [${cards.size}件]:\n")
-                        cards.forEachIndexed { i, c -> append("${i + 1}. $c\n") }
-                    }
-                    if (rule.fixedContent.isNotBlank()) {
-                        if (cards.isNotEmpty()) append("\n")
-                        append(rule.fixedContent)
-                    }
-                }.trim()
-
-                val (ok, msg) = MtopClient.confirmDummyShipping(
-                    cookie, order.orderId, rule.tradeText,
-                    onCookieRefreshed = { refreshed ->
-                        AccountManager.persistRefreshedCookie(applicationContext, refreshed)
-                    },
-                    onResult = recordResult
+                DeliveryEngine.enqueue(
+                    applicationContext, order.orderId, unb, "POLL",
+                    buyerId = order.buyerId, buyerNick = order.buyerNick, itemId = order.itemId,
+                    title = order.title, sku = order.sku, quantity = order.quantity, price = order.price,
+                    processNow = false
                 )
-                db.recordLog(order.orderId, rule.keyword, content, if (ok) "自动发货完成" else "发货反馈: $msg")
-                handled++
-            }.onFailure {
-                Log.w(TAG, "handle order failed: ${order.orderId}", it)
-            }
+            }.onFailure { Log.w(TAG, "enqueue order failed: ${order.orderId}", it) }
         }
+        val handled = DeliveryEngine.processDue(applicationContext, DeliveryEngine.HealthHook(unb, recordResult))
 
         if (handled > 0) {
-            updateNotification("🎉 今日已自动发货 $handled 单")
+            updateNotification("🎉 本轮自动发货 $handled 单")
+        }
+    }
+
+    /** 每 5 秒处理到期的发货任务（延时发货 / IM 触发），并同步 IM 连接与每日擦亮。 */
+    private var taskJob: Job? = null
+
+    private fun startTaskLoop() {
+        if (taskJob?.isActive == true) return
+        taskJob = scope.launch {
+            var n = 0
+            while (isActive) {
+                delay(5_000L)
+                val ctx = applicationContext
+                val db = CardDatabase.get(ctx)
+                if (db.getSetting("daemon_enabled", "true") != "true") continue
+                runCatching { DeliveryEngine.processDue(ctx, null) }.onFailure { Log.w(TAG, "task loop", it) }
+                if (++n % 6 == 0) {
+                    runCatching { ImManager.sync(ctx) }
+                    runCatching { dailyPolish(db) }
+                }
+            }
+        }
+    }
+
+    /** 每日定时擦亮（设置 auto_polish_time=HH:mm，留空关闭）。参考 automation_loop.daily_polish。 */
+    private fun dailyPolish(db: CardDatabase) {
+        val target = db.getSetting("auto_polish_time", "").trim()
+        if (!Regex("\\d{2}:\\d{2}").matches(target)) return
+        val now = java.util.Calendar.getInstance()
+        val hhmm = String.format(java.util.Locale.US, "%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))
+        val today = String.format(java.util.Locale.US, "%tF", now)
+        if (hhmm < target || db.getSetting("auto_polish_last", "") == today) return
+        db.saveSetting("auto_polish_last", today)
+        val cookie = db.getActiveCookie()
+        if (cookie.isBlank()) return
+        scope.launch {
+            val res = MtopClient.queryOnSaleItems(cookie, onCookieRefreshed = {
+                AccountManager.persistRefreshedCookie(applicationContext, it)
+            })
+            var ok = 0
+            for (it in res.items) {
+                if (MtopClient.polishItem(db.getActiveCookie().ifBlank { cookie }, it.id).first) ok++
+                delay(3_000L)
+            }
+            db.saveSetting("auto_polish_result", "$today 擦亮 $ok/${res.items.size}")
         }
     }
 
     override fun onDestroy() {
         isRunning = false
         loopJob?.cancel()
+        taskJob?.cancel()
+        runCatching { ImManager.stopAll() }
         scope.cancel()
         localServer?.stop()
         localServer = null

@@ -14,7 +14,7 @@ class CardDatabase private constructor(context: Context) :
 
     companion object {
         private const val DB_NAME = "xianyu_copilot.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
 
         private const val T_CARDS = "card_keys"
         private const val T_RULES = "delivery_rules"
@@ -106,6 +106,9 @@ class CardDatabase private constructor(context: Context) :
                 use_pool INTEGER NOT NULL DEFAULT 1,
                 fixed_content TEXT NOT NULL DEFAULT '',
                 trade_text TEXT NOT NULL DEFAULT '',
+                delay_minutes INTEGER NOT NULL DEFAULT 0,
+                template_id INTEGER NOT NULL DEFAULT 0,
+                send_im INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL
             )
             """.trimIndent()
@@ -146,6 +149,12 @@ class CardDatabase private constructor(context: Context) :
         if (oldVersion < 3) {
             addColumnIfMissing(db, T_ACCOUNTS, "last_check_at", "INTEGER NOT NULL DEFAULT 0")
             addColumnIfMissing(db, T_ACCOUNTS, "last_check_msg", "TEXT NOT NULL DEFAULT ''")
+        }
+        // v4 (v1.5.0): 发货规则扩展——延时发货、发货模板、是否通过 IM 把内容发给买家
+        if (oldVersion < 4) {
+            addColumnIfMissing(db, T_RULES, "delay_minutes", "INTEGER NOT NULL DEFAULT 0")
+            addColumnIfMissing(db, T_RULES, "template_id", "INTEGER NOT NULL DEFAULT 0")
+            addColumnIfMissing(db, T_RULES, "send_im", "INTEGER NOT NULL DEFAULT 1")
         }
     }
 
@@ -204,7 +213,10 @@ class CardDatabase private constructor(context: Context) :
         val usePool: Boolean,
         val fixedContent: String,
         val tradeText: String,
-        val createdAt: Long
+        val createdAt: Long,
+        val delayMinutes: Int = 0,
+        val templateId: Long = 0,
+        val sendIm: Boolean = true
     )
 
     data class DeliveryLog(
@@ -730,7 +742,10 @@ class CardDatabase private constructor(context: Context) :
         sku: String,
         usePool: Boolean,
         fixedContent: String,
-        tradeText: String
+        tradeText: String,
+        delayMinutes: Int = 0,
+        templateId: Long = 0,
+        sendIm: Boolean = true
     ): Long = synchronized(writeLock) {
         val k = keyword.trim()
         if (k.isEmpty()) return -1
@@ -740,6 +755,9 @@ class CardDatabase private constructor(context: Context) :
             put("use_pool", if (usePool) 1 else 0)
             put("fixed_content", fixedContent.orEmpty())
             put("trade_text", tradeText.orEmpty())
+            put("delay_minutes", delayMinutes.coerceIn(0, 1440))
+            put("template_id", templateId)
+            put("send_im", if (sendIm) 1 else 0)
         }
         val db = writableDatabase
         if (id > 0) {
@@ -754,7 +772,7 @@ class CardDatabase private constructor(context: Context) :
     fun getRules(): List<DeliveryRule> {
         val out = ArrayList<DeliveryRule>()
         readableDatabase.rawQuery(
-            "SELECT id,keyword,sku,use_pool,fixed_content,trade_text,created_at FROM $T_RULES ORDER BY id DESC",
+            "SELECT id,keyword,sku,use_pool,fixed_content,trade_text,created_at,delay_minutes,template_id,send_im FROM $T_RULES ORDER BY id DESC",
             null
         ).use { c ->
             while (c.moveToNext()) {
@@ -766,7 +784,10 @@ class CardDatabase private constructor(context: Context) :
                         usePool = c.getInt(3) == 1,
                         fixedContent = c.getString(4).orEmpty(),
                         tradeText = c.getString(5).orEmpty(),
-                        createdAt = c.getLong(6)
+                        createdAt = c.getLong(6),
+                        delayMinutes = c.getInt(7),
+                        templateId = c.getLong(8),
+                        sendIm = c.getInt(9) == 1
                     )
                 )
             }
@@ -782,7 +803,7 @@ class CardDatabase private constructor(context: Context) :
         val t = title.orEmpty()
         val s = sku.trim()
         val sql = """
-            SELECT id,keyword,sku,use_pool,fixed_content,trade_text,created_at
+            SELECT id,keyword,sku,use_pool,fixed_content,trade_text,created_at,delay_minutes,template_id,send_im
             FROM $T_RULES
             WHERE (sku=? OR sku='')
             ORDER BY CASE WHEN sku=? THEN 0 ELSE 1 END, id DESC
@@ -798,12 +819,36 @@ class CardDatabase private constructor(context: Context) :
                         usePool = c.getInt(3) == 1,
                         fixedContent = c.getString(4).orEmpty(),
                         tradeText = c.getString(5).orEmpty(),
-                        createdAt = c.getLong(6)
+                        createdAt = c.getLong(6),
+                        delayMinutes = c.getInt(7),
+                        templateId = c.getLong(8),
+                        sendIm = c.getInt(9) == 1
                     )
                 }
             }
         }
         return null
+    }
+
+    /** 该订单已经出库的卡密（用于重试发货时把同一批卡密重新发给买家，绝不再抢新卡）。 */
+    fun getCardsByOrder(orderId: String): List<String> {
+        val o = orderId.trim()
+        if (o.isEmpty()) return emptyList()
+        val out = ArrayList<String>()
+        readableDatabase.rawQuery(
+            "SELECT card_content FROM $T_CARDS WHERE order_id=? ORDER BY id ASC", arrayOf(o)
+        ).use { c -> while (c.moveToNext()) out.add(c.getString(0).orEmpty()) }
+        return out
+    }
+
+    /** 某关键词（可选规格）剩余可用卡密数，用于低库存预警。 */
+    fun availableCount(keyword: String, sku: String): Long {
+        val k = keyword.trim()
+        val s = sku.trim()
+        val (sql, args) = if (s.isNotEmpty())
+            "SELECT COUNT(*) FROM $T_CARDS WHERE keyword=? AND sku=? AND is_used=0" to arrayOf(k, s)
+        else "SELECT COUNT(*) FROM $T_CARDS WHERE keyword=? AND is_used=0" to arrayOf(k)
+        return readableDatabase.rawQuery(sql, args).use { if (it.moveToFirst()) it.getLong(0) else 0L }
     }
 
     // ---------------------------------------------------------------------

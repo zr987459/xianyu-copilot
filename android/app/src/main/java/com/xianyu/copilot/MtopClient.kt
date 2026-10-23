@@ -48,7 +48,10 @@ object MtopClient {
         val price: String = "",
         val buyerCity: String = "",
         val buyerMessage: String = "",
-        val createTime: String = ""
+        val createTime: String = "",
+        /** 以下两项字段名未经真机报文校准（needs real-device calibration），取不到时为空 */
+        val buyerId: String = "",
+        val itemId: String = ""
     )
 
     /** 在售商品统一数据模型。 */
@@ -633,7 +636,15 @@ object MtopClient {
                 ?: (if (common != null) firstNonBlank(common, "createTime", "orderTime") else null)
                 ?: ""
 
-            out.add(SoldOrder(orderId, title, sku, buyer, status, qty, price, city, msg, cTime))
+            val buyerId = firstNonBlank(o, "buyerId", "buyerUserId", "buyerUid")
+                ?: (if (buyerVo != null) firstNonBlank(buyerVo, "userId", "buyerId", "uid") else null)
+                ?: ""
+            val itemId = firstNonBlank(o, "itemId", "auctionId", "item_id")
+                ?: (if (common != null) firstNonBlank(common, "itemId") else null)
+                ?: o.optJSONObject("itemVO")?.let { firstNonBlank(it, "itemId", "id") }
+                ?: ""
+
+            out.add(SoldOrder(orderId, title, sku, buyer, status, qty, price, city, msg, cTime, buyerId, itemId))
         }
         return out
     }
@@ -944,4 +955,200 @@ object MtopClient {
         val itemId = r.json?.optJSONObject("data")?.let { firstNonBlank(it, "itemId", "id") }.orEmpty()
         return true to (if (itemId.isNotBlank()) "发布成功！商品ID: $itemId" else "商品发布成功")
     }
+
+    // ==================== v1.5.0 新增：通用调用 + IM / 商品 / 订单接口 ====================
+
+    /** 对外暴露的调用结果。 */
+    data class CallResult(val success: Boolean, val retCode: String, val message: String, val json: JSONObject?) {
+        val data: JSONObject? get() = json?.optJSONObject("data")
+        val error: String get() = retCode.ifBlank { message }
+    }
+
+    /**
+     * 通用 mtop 调用（带令牌自愈）。供 IM / 商品管理 / 订单详情等新功能使用，
+     * 不传 onResult —— 这些未经大规模验证的接口返回值绝不参与账号「失效」判定，
+     * 避免回归 v1.4.2 修好的误报问题。
+     */
+    fun call(
+        cookie: String,
+        api: String,
+        version: String,
+        data: JSONObject,
+        spmCnt: String = "a21ybx.item.0.0",
+        extraQuery: Map<String, String> = emptyMap(),
+        onCookieRefreshed: ((String) -> Unit)? = null
+    ): CallResult {
+        if (cookie.isBlank()) return CallResult(false, "NO_COOKIE", "未绑定账号", null)
+        val q = LinkedHashMap<String, String>()
+        q["spm_cnt"] = spmCnt
+        q.putAll(extraQuery)
+        val r = callMtop(cookie, api, version, data, extraQuery = q, onCookieRefreshed = onCookieRefreshed)
+        return CallResult(r.success, r.retCode, r.message, r.json)
+    }
+
+    /**
+     * 获取 IM 长连接 accessToken（mtop.taobao.idlemessage.pc.login.token）。
+     * 参数来自 xianyu-auto-reply 的 refresh_token。
+     */
+    fun getImToken(cookie: String, deviceId: String, onCookieRefreshed: ((String) -> Unit)? = null): Pair<String?, String> {
+        val data = JSONObject().apply {
+            put("appKey", "444e9908a51d1cb236a27862abc769c9")
+            put("deviceId", deviceId)
+        }
+        val r = call(
+            cookie, "mtop.taobao.idlemessage.pc.login.token", "1.0", data,
+            spmCnt = "a21ybx.im.0.0",
+            extraQuery = mapOf("spm_pre" to "a21ybx.home.sidebar.1.4c053da6vYwnmf", "log_id" to "4c053da6vYwnmf"),
+            onCookieRefreshed = onCookieRefreshed
+        )
+        val token = r.data?.optString("accessToken").orEmpty()
+        return if (r.success && token.isNotBlank()) token to "成功" else null to r.error
+    }
+
+    /** IM 会话列表（mtop.taobao.idlemessage.pc.session.sync v3.0），用于首屏与断线后补齐。 */
+    fun syncSessions(cookie: String, fetchNum: Int = 50, onCookieRefreshed: ((String) -> Unit)? = null): CallResult =
+        call(cookie, "mtop.taobao.idlemessage.pc.session.sync", "3.0", JSONObject().put("fetchNum", fetchNum),
+            spmCnt = "a21ybx.im.0.0", onCookieRefreshed = onCookieRefreshed)
+
+    data class ItemDetail(
+        val itemId: String, val title: String, val price: String, val desc: String,
+        val images: List<String>, val sellerId: String, val raw: JSONObject?
+    )
+
+    /** 商品详情（mtop.taobao.idle.pc.detail），用于 AI 上下文、IM 订单补标题、采集复制。 */
+    fun getItemDetail(cookie: String, itemId: String, onCookieRefreshed: ((String) -> Unit)? = null): Pair<ItemDetail?, String> {
+        val r = call(cookie, "mtop.taobao.idle.pc.detail", "1.0", JSONObject().put("itemId", itemId),
+            onCookieRefreshed = onCookieRefreshed)
+        if (!r.success) return null to r.error
+        val d = r.data ?: return null to "空响应"
+        val itemDO = d.optJSONObject("itemDO") ?: d.optJSONObject("item") ?: d
+        val title = firstNonBlank(itemDO, "title", "itemTitle").orEmpty()
+        val price = firstNonBlank(itemDO, "soldPrice", "price", "reservePrice").orEmpty()
+        val desc = firstNonBlank(itemDO, "desc", "description").orEmpty()
+        val imgs = ArrayList<String>()
+        val arr = itemDO.optJSONArray("imageInfos") ?: itemDO.optJSONArray("images")
+        if (arr != null) for (i in 0 until arr.length()) {
+            val v = arr.opt(i)
+            val u = when (v) {
+                is JSONObject -> firstNonBlank(v, "url", "picUrl").orEmpty()
+                is String -> v
+                else -> ""
+            }
+            if (u.isNotBlank()) imgs.add(if (u.startsWith("//")) "https:$u" else u)
+        }
+        val seller = d.optJSONObject("sellerDO") ?: d.optJSONObject("seller")
+        val sellerId = seller?.let { firstNonBlank(it, "sellerId", "userId") }.orEmpty()
+        return ItemDetail(itemId, title, price, desc, imgs, sellerId, d) to "成功"
+    }
+
+    /** 擦亮（mtop.taobao.idle.item.polish）。IDLEITEM_POLISH_AGAIN 视为今日已擦亮。 */
+    fun polishItem(cookie: String, itemId: String, onCookieRefreshed: ((String) -> Unit)? = null): Pair<Boolean, String> {
+        val r = call(cookie, "mtop.taobao.idle.item.polish", "1.0", JSONObject().put("itemId", itemId),
+            onCookieRefreshed = onCookieRefreshed)
+        if (r.success) return true to "擦亮成功"
+        if (r.error.contains("IDLEITEM_POLISH_AGAIN")) return true to "今日已擦亮"
+        return false to r.error
+    }
+
+    /** 下架（mtop.taobao.idle.item.downshelf v2.0）。 */
+    fun downshelfItem(cookie: String, itemId: String, onCookieRefreshed: ((String) -> Unit)? = null): Pair<Boolean, String> {
+        val r = call(cookie, "mtop.taobao.idle.item.downshelf", "2.0", JSONObject().put("itemId", itemId),
+            onCookieRefreshed = onCookieRefreshed)
+        return if (r.success) true to "已下架" else false to r.error
+    }
+
+    /** 编辑详情（mtop.idle.pc.idleitem.editDetail），改价/重新上架都基于它。 */
+    fun itemEditDetail(cookie: String, itemId: String, onCookieRefreshed: ((String) -> Unit)? = null): CallResult =
+        call(cookie, "mtop.idle.pc.idleitem.editDetail", "1.0", JSONObject().put("itemId", itemId),
+            spmCnt = "a21ybx.publish.0.0", onCookieRefreshed = onCookieRefreshed)
+
+    /** 按参考实现 build_reshelf_payload 从 editDetail 结果构造 idleitem.edit 提交体。 */
+    private fun buildEditPayload(detail: JSONObject, itemId: String): JSONObject {
+        val p = JSONObject()
+        val keys = listOf(
+            "attribute_biz_line", "bizcode", "bucketId", "canBargain", "defaultPrice", "errorTipsMsg", "freebies",
+            "itemStatus", "itemTypeStr", "quantity", "scene", "simpleItem", "supportBargainPrice", "topics",
+            "asyncSecurityInfo", "baseParams", "itemAddrDTO", "itemCatDTO", "itemGroupDTO", "itemPostFeeDTO",
+            "itemPriceDTO", "itemTextDTO", "itemTopicParams", "yhbItemInfoDTO",
+            "imageInfoDOList", "itemLabelExtList", "itemProperties", "itemSkuList", "userRightsProtocols"
+        )
+        for (k in keys) if (detail.has(k)) p.put(k, detail.get(k))
+        p.put("itemId", itemId)
+        p.put("sourceId", detail.optString("sourceId").ifBlank { itemId })
+        p.put("uniqueCode", java.util.UUID.randomUUID().toString().replace("-", ""))
+        p.put("bizcode", p.optString("bizcode").ifBlank { "pcMainPublish" })
+        p.put("publishScene", detail.optString("publishScene").ifBlank { "pcMainPublish" })
+        if (!p.has("quantity")) p.put("quantity", "1")
+        if (!p.has("scene")) p.put("scene", "")
+        if (!p.has("itemTypeStr")) p.put("itemTypeStr", "b")
+        if (!p.has("itemGroupDTO")) p.put("itemGroupDTO", JSONObject().put("groupId", ""))
+        if (!p.has("topics")) p.put("topics", JSONArray())
+        p.optJSONObject("itemPostFeeDTO")?.let { pf ->
+            for (k in listOf("canFreeShipping", "supportFreight", "onlyTakeSelf")) {
+                if (pf.has(k)) pf.put(k, pf.opt(k).toString().equals("true", true))
+            }
+        }
+        return p
+    }
+
+    private fun submitEdit(cookie: String, payload: JSONObject, onCookieRefreshed: ((String) -> Unit)?): CallResult =
+        call(cookie, "mtop.idle.pc.idleitem.edit", "1.0", payload, spmCnt = "a21ybx.publish.0.0",
+            onCookieRefreshed = onCookieRefreshed)
+
+    /** 重新上架：editDetail → edit（参考 reshelf_item）。虚拟商品可能不支持 PC 端上架。 */
+    fun reshelfItem(cookie: String, itemId: String, onCookieRefreshed: ((String) -> Unit)? = null): Pair<Boolean, String> {
+        val d = itemEditDetail(cookie, itemId, onCookieRefreshed)
+        val data = d.data
+        if (!d.success || data == null) return false to "获取编辑详情失败: ${d.error}"
+        val r = submitEdit(cookie, buildEditPayload(data, itemId), onCookieRefreshed)
+        return if (r.success) true to "已重新上架" else false to r.error
+    }
+
+    /** 改价：editDetail → 改 itemPriceDTO → edit（参考 update_item_price）。 */
+    fun updateItemPrice(
+        cookie: String, itemId: String, price: Double, origPrice: Double? = null,
+        onCookieRefreshed: ((String) -> Unit)? = null
+    ): Pair<Boolean, String> {
+        if (price <= 0) return false to "价格必须大于 0"
+        val d = itemEditDetail(cookie, itemId, onCookieRefreshed)
+        val data = d.data
+        if (!d.success || data == null) return false to "获取编辑详情失败: ${d.error}"
+        val p = buildEditPayload(data, itemId)
+        val dto = p.optJSONObject("itemPriceDTO") ?: JSONObject()
+        dto.put("priceInCent", toCent(price))
+        if (origPrice != null && origPrice > 0) dto.put("origPriceInCent", toCent(origPrice))
+        p.put("itemPriceDTO", dto)
+        p.put("defaultPrice", false)
+        val r = submitEdit(cookie, p, onCookieRefreshed)
+        return if (r.success) true to "已改价为 $price" else false to r.error
+    }
+
+    private fun toCent(v: Double): String = java.math.BigDecimal(v.toString())
+        .multiply(java.math.BigDecimal(100)).setScale(0, java.math.RoundingMode.HALF_UP).toLong().toString()
+
+    /**
+     * 订单详情（mtop.idle.web.trade.order.detail）。
+     * needs real-device calibration：参考项目只在浏览器里拦截了这个接口的响应，未给出请求参数，
+     * 这里按网页订单详情页 URL（order-detail?orderId=..&role=seller）推测为 tid/orderId。
+     */
+    fun orderDetail(cookie: String, orderId: String, onCookieRefreshed: ((String) -> Unit)? = null): CallResult {
+        val data = JSONObject().put("tid", orderId).put("orderId", orderId).put("role", "seller")
+        return call(cookie, "mtop.idle.web.trade.order.detail", "1.0", data, spmCnt = "a21ybx.order-detail.0.0",
+            onCookieRefreshed = onCookieRefreshed)
+    }
+
+    /** 下载远程图片（采集复制时转存到自己的图床）。 */
+    fun downloadBytes(url: String, maxBytes: Int = 8 * 1024 * 1024): ByteArray? = runCatching {
+        val req = Request.Builder().url(url).header("User-Agent", UA).build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return null
+            val body = resp.body ?: return null
+            if (body.contentLength() > maxBytes) return null
+            val b = body.bytes()
+            if (b.size > maxBytes) null else b
+        }
+    }.getOrNull()
+
+    /** 共享给 IM / AI / 通知模块的 OkHttp 客户端（复用连接池）。 */
+    val sharedClient: OkHttpClient get() = client
 }
