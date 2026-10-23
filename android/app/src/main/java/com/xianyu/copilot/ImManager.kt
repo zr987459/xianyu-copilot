@@ -187,9 +187,12 @@ object ImManager : ImClient.Listener {
         val c = clients[accountId] ?: return false to "该账号 IM 未启动"
         var to = toUserId
         if (to.isBlank()) to = OpsDatabase.get(app).conversation(accountId, chatId)?.optString("buyer_id").orEmpty()
+        // 先登记再发送：服务端回显可能比 RPC 回包更早到，晚登记会把自动回复误判成人工接管
+        val prev = recentAutoOut[chatId]
+        recentAutoOut[chatId] = text to System.currentTimeMillis()
         val r = c.sendText(chatId, to, text)
+        if (!r.first) { if (prev != null) recentAutoOut[chatId] = prev else recentAutoOut.remove(chatId) }
         if (r.first) {
-            recentAutoOut[chatId] = text to System.currentTimeMillis()
             OpsDatabase.get(app).saveMessage(accountId, chatId, "out", accountId, "我", text, "",
                 System.currentTimeMillis(), kind = kind, countUnread = false)
         }
