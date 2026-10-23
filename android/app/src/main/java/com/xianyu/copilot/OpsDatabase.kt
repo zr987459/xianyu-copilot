@@ -475,7 +475,13 @@ class OpsDatabase private constructor(context: Context) :
         writableDatabase.update("delivery_tasks", cv, "order_id=? AND status=?", arrayOf(orderId, fromStatus)) == 1
     }
 
-    fun rescheduleTask(orderId: String, fromStatus: String, at: Long, error: String = ""): Boolean = synchronized(lock) {
+    /** countAttempt=false 表示只是「等待」（等标题 / 延时），把本轮计入的尝试次数退回。 */
+    fun rescheduleTask(orderId: String, fromStatus: String, at: Long, error: String = "", countAttempt: Boolean = true): Boolean = synchronized(lock) {
+        if (!countAttempt) {
+            writableDatabase.execSQL(
+                "UPDATE delivery_tasks SET attempts=MAX(attempts-1,0) WHERE order_id=? AND status=?", arrayOf(orderId, fromStatus)
+            )
+        }
         val cv = ContentValues().apply {
             put("status", "PENDING"); put("scheduled_at", at); put("updated_at", now()); put("last_error", error)
         }

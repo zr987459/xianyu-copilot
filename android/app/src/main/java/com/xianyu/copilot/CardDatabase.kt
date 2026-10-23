@@ -886,6 +886,15 @@ class CardDatabase private constructor(context: Context) :
         return false
     }
 
+    /** 是否已有「发货完成」流水（比 hasOrderDelivered 严格：卡密已出库但确认失败的订单允许重试）。 */
+    fun hasSuccessLog(orderId: String): Boolean {
+        val o = orderId.trim()
+        if (o.isEmpty()) return false
+        return readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM $T_LOGS WHERE order_id=? AND confirm_status LIKE '%完成%'", arrayOf(o)
+        ).use { it.moveToFirst() && it.getInt(0) > 0 }
+    }
+
     fun getLogs(limit: Int): List<DeliveryLog> {
         val lim = if (limit <= 0) 100 else limit
         val out = ArrayList<DeliveryLog>()

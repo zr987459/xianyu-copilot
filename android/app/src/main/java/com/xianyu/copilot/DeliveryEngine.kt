@@ -89,7 +89,7 @@ object DeliveryEngine {
         buyerId: String = "", buyerNick: String = "", itemId: String = ""
     ): Outcome {
         val db = CardDatabase.get(context)
-        if (db.hasOrderDelivered(orderId)) return Outcome(true, "该订单此前已发货，未重复发送", duplicated = true)
+        if (db.hasSuccessLog(orderId)) return Outcome(true, "该订单此前已发货，未重复发送", duplicated = true)
         val ops = OpsDatabase.get(context)
         ops.upsertOrder(orderId, accountId, itemId, title, sku, quantity, "", buyerId, buyerNick, "", "待发货", "MANUAL")
         ops.enqueueTask(orderId, accountId, "", buyerId, buyerNick, itemId, title, sku, quantity, "MANUAL", System.currentTimeMillis())
@@ -111,7 +111,8 @@ object DeliveryEngine {
 
         fun finish(status: String, msg: String) { ops.casTask(orderId, "RUNNING", status, msg) }
 
-        if (db.hasOrderDelivered(orderId)) {
+        // 只认「发货完成」流水；卡密已出库但确认失败的订单会复用同一批卡密重试
+        if (db.hasSuccessLog(orderId)) {
             finish("DONE", "此前已发货")
             return Outcome(true, "该订单此前已发货，未重复发送", duplicated = true)
         }
@@ -135,7 +136,7 @@ object DeliveryEngine {
             }
         }
         if (title.isBlank() && !manual && System.currentTimeMillis() - t.createdAt < WAIT_TITLE_MS) {
-            ops.rescheduleTask(orderId, "RUNNING", System.currentTimeMillis() + 30_000L, "等待订单标题")
+            ops.rescheduleTask(orderId, "RUNNING", System.currentTimeMillis() + 30_000L, "等待订单标题", countAttempt = false)
             return Outcome(false, "等待订单标题")
         }
 
@@ -158,7 +159,7 @@ object DeliveryEngine {
         if (!manual && rule.delayMinutes > 0) {
             val due = t.createdAt + rule.delayMinutes * 60_000L
             if (System.currentTimeMillis() < due) {
-                ops.rescheduleTask(orderId, "RUNNING", due, "延时发货中")
+                ops.rescheduleTask(orderId, "RUNNING", due, "延时发货中", countAttempt = false)
                 return Outcome(false, "延时 ${rule.delayMinutes} 分钟后发货")
             }
         }
@@ -197,6 +198,11 @@ object DeliveryEngine {
 
         db.recordLog(orderId, rule.keyword, content,
             (if (ok) (if (manual) "发货完成" else "自动发货完成") else "发货反馈: $msg") + imNote)
+        // 确认失败（网络 / 风控）自动重试，最多 3 次，间隔递增；卡密已绑定订单，重试不会多占库存
+        if (!ok && !manual && t.attempts < 2 && !MtopClient.isSessionDead(msg)) {
+            ops.rescheduleTask(orderId, "RUNNING", System.currentTimeMillis() + (t.attempts + 1) * 120_000L, "确认失败，稍后重试: $msg")
+            return Outcome(false, msg, cards.size)
+        }
         finish(if (ok) "DONE" else "FAILED", if (ok) "完成$imNote" else msg)
         ops.setOrderStatus(orderId, if (ok) "已发货" else "发货失败")
 
