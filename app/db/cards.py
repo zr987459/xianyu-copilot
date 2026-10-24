@@ -55,7 +55,7 @@ def claim_cards(db_path: str, keyword: str, order_id: str, quantity: int = 1,
     if not keyword or not order_id:
         # 空订单号会让所有“无单号”的订单命中同一批卡（重复发给不同买家）
         raise ValueError("keyword 与 order_id 均不能为空")
-    if not isinstance(quantity, int) or quantity < 1 or quantity > MAX_QUANTITY:
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1 or quantity > MAX_QUANTITY:
         raise ValueError(f"quantity 必须在 1..{MAX_QUANTITY} 之间")
 
     conn = _connect(db_path)
@@ -65,10 +65,18 @@ def claim_cards(db_path: str, keyword: str, order_id: str, quantity: int = 1,
         except sqlite3.OperationalError as e:
             raise StockLockError(str(e)) from e
 
-        existing = [dict(r) for r in conn.execute(
-            "SELECT id, card_content, order_seq FROM card_keys WHERE order_id=? ORDER BY order_seq ASC",
+        rows = conn.execute(
+            "SELECT id, card_content, order_seq, keyword, sku FROM card_keys WHERE order_id=? ORDER BY order_seq ASC",
             (order_id,),
-        ).fetchall()]
+        ).fetchall()
+        # 同一订单的卡必须来自同一个池：已绑定的卡与本次 (keyword, sku) 不一致时拒绝补发，
+        # 否则规则/规格改动后重跑会出现“前 2 张月卡 + 第 3 张年卡”的混发订单。
+        for r in rows:
+            if (r["keyword"] or "").strip() != keyword or (r["sku"] or "").strip() != sku:
+                raise ValueError(
+                    f"订单已从 [{r['keyword']}/{r['sku'] or '通用'}] 出库，拒绝从 [{keyword}/{sku or '通用'}] 补发"
+                )
+        existing = [{"id": r["id"], "card_content": r["card_content"], "order_seq": r["order_seq"]} for r in rows]
         result = ClaimResult(requested=quantity, cards=existing)
         need = quantity - len(existing)
         if need <= 0:

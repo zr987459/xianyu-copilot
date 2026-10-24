@@ -5,6 +5,7 @@
 - 常量时间比较，防计时攻击。
 """
 import hmac
+import ipaddress
 import os
 
 from fastapi import Request
@@ -19,15 +20,16 @@ def admin_token() -> str:
 
 
 def is_local_or_private(host: str) -> bool:
+    """本机或 RFC1918 私网。原先用 startswith("172.") 会把 172.217.x.x（谷歌等公网段）也当成内网。"""
     if not host:
         return True
-    return (
-        host in LOCAL_HOSTS
-        or host.startswith("127.")
-        or host.startswith("10.")
-        or host.startswith("192.168.")
-        or host.startswith("172.")
-    )
+    if host in LOCAL_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private and not ip.is_link_local
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):

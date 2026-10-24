@@ -308,6 +308,8 @@ class AutoDeliveryManager:
             except StockLockError:
                 logger.warning(f"卡密库繁忙，订单 ***{tail} 稍后重试（未通知买家）")
                 return False
+            except ValueError as e:  # 已绑定的卡与本次池不一致（规则关键词被改过等）
+                return _manual(str(e))
             bound = res.delivered
             # 发“已绑定但还没送达”的那部分（含上次发消息失败的件），而不只是本次新绑定的
             to_send = [c for c in res.cards if int(c["order_seq"] or 0) > sent_count]
